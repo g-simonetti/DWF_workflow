@@ -1,0 +1,82 @@
+import yaml
+
+# -------------------------------------------------
+# Rule 1: compute residual mass for each configuration
+# -------------------------------------------------
+rule m_res:
+    input:
+        "raw_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
+    output:
+        "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons/m_res.txt"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/parameter_scan/residual_mass.py {input} --output_file {output}"
+
+
+# -------------------------------------------------
+# Rule 2: unified plotting rule
+# -------------------------------------------------
+rule plot_mres:
+    input:
+        lambda wildcards: (
+            # Load YAML for the given scan parameter (wildcards.scan)
+            lambda params=yaml.safe_load(
+                open(f"metadata/{wildcards.subdir}/ensembles_{wildcards.scan}.yaml")
+            )[0]:
+                expand(
+                    "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+                    "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons/m_res.txt",
+                    subdir=wildcards.subdir,
+                    alpha=params["alpha"],
+                    Nt=params["Nt"],
+                    Ns=params["Ns"],
+                    Ls=params["Ls"],
+                    beta=params["beta"],
+                    mass=params["mass"],
+                    a5=params["a5"],
+                    mpv=params["mpv"],
+                    M5=params["M5"]
+                )
+        )(),
+    output:
+        "assets/plots/{subdir}/mres_scan_{scan}.pdf",
+    conda:
+        "envs/analysis.yml",
+    shell:
+        # Run the single unified Python script, passing the scan variable as a flag
+        "python src/parameter_scan/plot_mres_scan.py {input} --{wildcards.scan} --output_filename {output}"
+
+
+# -------------------------------------------------
+# Rule 3: unified table rule
+# -------------------------------------------------
+rule table_mres:
+    input:
+        lambda wildcards: (
+            lambda params=yaml.safe_load(
+                open(f"metadata/{wildcards.subdir}/ensembles_{wildcards.scan}.yaml")
+            )[0]:
+                expand(
+                    "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+                    "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons/m_res.txt",
+                    subdir=wildcards.subdir,
+                    alpha=params["alpha"],
+                    Nt=params["Nt"],
+                    Ns=params["Ns"],
+                    Ls=params["Ls"],
+                    beta=params["beta"],
+                    mass=params["mass"],
+                    a5=params["a5"],
+                    mpv=params["mpv"],
+                    M5=params["M5"]
+                )
+        )(),
+    output:
+        "assets/tables/{subdir}/mres_scan_{scan}_table.tex",
+    conda: "envs/analysis.yml",
+    shell:
+        "python src/parameter_scan/table_mres_scan.py {input} --{wildcards.scan} --output_filename {output}"
+
+
+
