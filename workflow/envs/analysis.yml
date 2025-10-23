@@ -1,4 +1,4 @@
-name: su2pg_analysis
+name: mdwf_analysis
 channels:
   - conda-forge
 dependencies:
