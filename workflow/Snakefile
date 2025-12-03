@@ -1,0 +1,429 @@
+import yaml
+import pandas
+configfile: "config/config.yaml"
+
+
+# -------------------------------------------------#
+# Func. 1: Read the ensembles YAML file for the    |
+#          current wildcards, then expand the      |
+#          given pattern for each ensemble.        |
+# Func. 2: Build the lookup query string for       |
+#          plateau_start / plateau_end             |
+# Func. 3: Build the path to the input/output.     |
+#          files to read ensembles in csv.         |         
+# -------------------------------------------------#
+
+
+def load_and_expand(wildcards, pattern):
+
+    yaml_file = f"metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml"
+
+    with open(yaml_file) as f:
+        ensembles = yaml.safe_load(f)
+
+    return sum([
+        expand(
+            pattern,
+            subdir=wildcards.subdir,
+            alpha = ens["alpha"],
+            Nt    = ens["Nt"],
+            Ns    = ens["Ns"],
+            Ls    = ens["Ls"],
+            beta  = ens["beta"],
+            mass  = ens["mass"],
+            a5    = ens["a5"],
+            mpv   = ens["mpv"],
+            M5    = ens["M5"],
+        )
+        for ens in ensembles
+    ], [])
+
+
+def find_query(wc):
+    return (
+        f"Nt == {wc.Nt} "
+        f"and Ns == {wc.Ns} "
+        f"and Ls == {wc.Ls} "
+        f"and beta == {wc.beta} "
+        f"and mass == {wc.mass} "
+        f"and alpha == {wc.alpha} "
+        f"and a5 == {wc.a5} "
+        f"and M5 == {wc.M5} "
+        f"and mpv == {wc.mpv}"
+    )
+
+
+def ensemble_files(subdir, filename):
+    """Return a list of paths for a given file under each ensemble."""
+    df = pandas.read_csv(f"metadata/{subdir}/ensembles.csv",
+                         sep=r'\t|,', engine='python')
+    paths = []
+    for _, row in df.iterrows():
+        paths.append(
+            f"intermediary_data/{subdir}/NF2/"
+            f"Nt{int(row['Nt'])}/Ns{int(row['Ns'])}/Ls{int(row['Ls'])}/"
+            f"B{row['beta']}/M{row['mass']}/"
+            f"mpv{row['mpv']}/alpha{row['alpha']}/a5{row['a5']}/M5{row['M5']}/{filename}"
+        )
+    return paths
+
+
+# -------------------------------------------------#
+# Rule 1: compute residual mass and the integrated |
+#         autocorrelation time for a given         |
+#         ensemble for every t/a                   |
+# Rule 2: reads the log files to extract the       |
+#         following quantities                     |
+#         - tau, n_steps, therm,                   |
+#         - n. gf CG app and t per traj.           |
+#         - tau_int(plaq)                          |
+# -------------------------------------------------#
+
+
+rule m_res:
+    input:
+        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
+    output:
+        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res.txt",
+        fit  = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt",
+        plot = multiext(
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t",
+            config["plot_filetype"],
+        ),
+    params:
+        plateau_start = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc),  cols="mres_p_start" ),
+        plateau_end  = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"),  query=find_query(wc), cols="mres_p_end" ),
+    conda:
+        "envs/analysis.yml",
+    shell:
+        (
+            "python src/residual_mass/residual_mass.py {input} "
+            "--label {config[label]} "
+            "--output_file1 {output.data} "
+            "--output_file2 {output.fit} "
+            "--plot_file {output.plot} "
+            "--plot_styles {config[plot_styles]} "
+            "--plateau_start {params.plateau_start} "
+            "--plateau_end {params.plateau_end} "
+            "--beta {wildcards.beta} "
+            "--mass {wildcards.mass} "
+            "--alpha {wildcards.alpha} "
+            "--a5 {wildcards.a5} "
+            "--m5 {wildcards.M5} "
+            "--mpv {wildcards.mpv} "
+        )
+
+        
+
+rule log_process:
+    input:
+        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
+    output:
+        "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
+    conda:
+        "envs/analysis.yml"
+    params:
+        therm = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="therm"),
+        delta = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="delta_traj"),
+        name  = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="name"),
+    shell:
+        "python src/hmc/log_ensembles_extract.py {input} "
+        "--name {params.name} "
+        "--therm {params.therm} "
+        "--delta_traj {params.delta} "
+        "--output_file {output}"
+
+
+# -------------------------------------------------
+# PARAMETER SCAN RULES:
+# -------------------------------------------------
+#  1) plots the residual mass as a function of
+#     - unphysical (alpha, M5, Ls, a5, mpv)
+#     - phyisical parameters (beta, m0)
+#  2) plots the computational costs
+#  3) store the values of the residual mass and
+#     of the integrated autocorrelation time
+#     in a latex table     
+# -------------------------------------------------
+
+
+
+rule plot_scans:
+    input:
+        lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
+        ),
+    output:
+        "assets/plots/{subdir}/{ensembles_subdir}/mres_scan_{scan}.pdf",
+    conda:
+        "envs/analysis.yml",
+    shell:
+        "python src/parameter_scan/plot_mres_scan.py {input} "
+        "--scan {wildcards.scan} "
+        "--metadata metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml "
+        "--label {config[label]} "
+        "--output_filename {output} "
+        "--plot_styles {config[plot_styles]}"
+
+
+# -------------------------------------------------
+# TABLES RULES:
+# -------------------------------------------------
+#  1) plots the residual mass as a function of
+#     - unphysical (alpha, M5, Ls, a5, mpv)
+#     - phyisical parameters (beta, m0)
+#  2) plots the computational costs
+#  3) store the values of the residual mass and
+#     of the integrated autocorrelation time
+#     in a latex table     
+# -------------------------------------------------
+
+
+
+rule table_ensembles_parameters:
+    input:
+        metadata = "metadata/{subdir}/ensembles.csv",
+        m_res = lambda w: ensemble_files(w.subdir, "residual_mass/m_res_fit.txt"),
+    output:
+        "assets/tables/{subdir}/ensemble_parameters_table.tex"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/residual_mass/table_ensembles_parameters_mres.py "
+        "--ensembles_csv {input.metadata} "
+        "--output_file {output}"
+
+
+
+rule table_hmc:
+    input:
+        hmc_logs = lambda w: ensemble_files(w.subdir, "hmc/log_hmc_extract.txt"),
+        metadata = "metadata/{subdir}/ensembles.csv"
+    output:
+        "assets/tables/{subdir}/table_hmc.tex"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/hmc/table_hmc.py "
+        "--inputs {input.hmc_logs} "
+        "--metadata_csv {input.metadata} "
+        "--output_file {output}"
+
+
+
+
+rule table_spectrum:
+    input:
+        spectrum = lambda w: ensemble_files(w.subdir, "spectrum/spectrum.txt"),
+        wflow    = lambda w: ensemble_files(w.subdir, "wflow/summary.txt"),
+        metadata = "metadata/{subdir}/ensembles.csv"
+    output:
+        "assets/tables/{subdir}/table_spectrum.tex"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/spectrum/spectrum_table.py "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--metadata_csv {input.metadata} "
+        "--output_file {output}"
+
+# -------------------------------------------------
+# BULK PHASE STUDY RULES:
+# -------------------------------------------------
+#  1) plots the average plaquette to check
+#     the dependence on Mobius parameters
+# -------------------------------------------------
+
+
+
+rule plaq_scans:
+    input:
+        lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
+        ),
+    output:
+        "assets/plots/{subdir}/{ensembles_subdir}/plaq_scan_{scan}.pdf",
+    conda:
+        "envs/analysis.yml",
+    shell:
+        "python src/bulk_phase/bulk_phase.py {input} "
+        "--scan {wildcards.scan} "
+        "--metadata metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml "
+        "--label {config[label]} "
+        "--output_filename {output} "
+        "--plot_styles {config[plot_styles]}"
+
+
+
+# -------------------------------------------------
+# WILSON FLOW RULES:
+# -------------------------------------------------
+#  1) Wilson flow rule 
+#  2) Scan w0 as a function of beta
+# -------------------------------------------------
+
+
+rule wflow:
+    input:
+        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
+    output:
+        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow.txt",
+        summary = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/summary.txt",
+        plot = multiext(
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract",
+            config["plot_filetype"],
+        ),
+    conda:
+        "envs/analysis.yml",
+    shell:
+        (
+            "python src/wflow/wflow.py {input} "
+            "--label {config[label]} "
+            "--W0 {config[W0_reference]} "
+            "--output_file {output.data} "
+            "--summary_file {output.summary} "
+            "--plot_file {output.plot} "
+            "--plot_styles {config[plot_styles]} "
+            "--beta {wildcards.beta} "
+            "--mass {wildcards.mass}"
+        )
+
+
+rule w0_scan:
+    input:
+        lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/summary.txt"
+        ),
+    output:
+        "assets/plots/{subdir}/{ensembles_subdir}/w0_beta_{scan}.pdf",
+    conda:
+        "envs/analysis.yml",
+    shell:
+        "python src/wflow/w0_beta.py {input} "
+        "--Nc {config[Nc]} "
+        "--nF {config[nF]} "
+        "--metadata metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml "
+        "--label {config[label]} "
+        "--output_filename {output} "
+        "--plot_styles {config[plot_styles]}"
+
+# -------------------------------------------------
+# SPECTRUM RULES:
+# -------------------------------------------------
+#  1) extract the effective mass for pseudoscalar 
+#     and vector mesons and stores them in a table
+#  2) plot m_ps*w0 against m_v*w0   
+# -------------------------------------------------
+
+
+
+rule spectrum:
+    input:
+        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
+    output:
+        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/spectrum.txt",
+        plot_ps = multiext(
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot",
+            config["plot_filetype"],
+        ),
+        plot_v  = multiext(
+            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot",
+            config["plot_filetype"],
+        ),
+    params:
+        plateau_start_ps = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="ps_p_start"),
+        plateau_end_ps   = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="ps_p_end"  ),
+        plateau_start_v  = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="v_p_start" ),
+        plateau_end_v    = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="v_p_end"   ),
+    conda:
+        "envs/analysis.yml",
+    shell:
+        (
+            "python src/spectrum/spectrum.py {input} "
+            "--label {config[label]} "
+            "--output_file {output.data} "
+            "--plot_file1 {output.plot_ps} "
+            "--plot_file2 {output.plot_v} "
+            "--plot_styles {config[plot_styles]} "
+            "--plateau_start_ps {params.plateau_start_ps} "
+            "--plateau_end_ps {params.plateau_end_ps} "
+            "--plateau_start_v {params.plateau_start_v} "
+            "--plateau_end_v {params.plateau_end_v} "
+            "--beta {wildcards.beta} "
+            "--mass {wildcards.mass}"
+        )
+
+
+
+rule plot_mps_mv:
+    input:
+        spectrum = lambda w: ensemble_files(w.subdir, "spectrum/spectrum.txt"),
+        wflow    = lambda w: ensemble_files(w.subdir, "wflow/summary.txt"),
+        metadata = "metadata/{subdir}/ensembles.csv"
+    output:
+        "assets/plots/{subdir}/mps_mv_plot.pdf"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/spectrum/mps_mv_plot.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--metadata_csv {input.metadata} "
+        "--output_file {output}"
+
+
+# -------------------------------------------------
+# COPY INTERMEDIATE OUTPUT TO ASSETS:
+# -------------------------------------------------
+#  1) copy the residual mass plot fits
+#  2) copy the wilson flow extractions   
+#  3) copy the 
+# -------------------------------------------------
+
+
+
+rule copy_mres_t_files_to_assets:
+    input:
+        mres_t = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t.pdf",
+    output:
+        mres_t_cp = "assets/plots/{subdir}/mres_t/B{beta}_M{mass}/"
+                    "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/mres_t.pdf",
+    shell:
+        """
+        cp {input.mres_t} {output.mres_t_cp}
+        """
+
+
+rule copy_wflow_files_to_assets:
+    input:
+        mres_t = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract.pdf",
+    output:
+        mres_t_cp = "assets/plots/{subdir}/wflow/B{beta}_M{mass}/"
+                    "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/w0_extract.pdf",
+    shell:
+        """
+        cp {input.mres_t} {output.mres_t_cp}
+        """
+
+rule copy_spectrum_to_assets:
+    input:
+        PS_fit = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot.pdf",
+        V_fit  = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot.pdf",
+    output:
+        PS_fit_cp = "assets/plots/{subdir}/mesons_fit/B{beta}_M{mass}/"
+                    "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/ps_plot.pdf",
+        V_fit_cp  = "assets/plots/{subdir}/mesons_fit/B{beta}_M{mass}/"
+                    "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/v_plot.pdf",
+    shell:
+        """
+        cp {input.PS_fit} {output.PS_fit_cp}
+        cp {input.V_fit} {output.V_fit_cp}
+        """
+
+
+
