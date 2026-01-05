@@ -384,6 +384,7 @@ rule plot_mps_mv:
 # -------------------------------------------------
 #  1) Plot m_ps against V for all finite volume 
 #   study ensembles
+#  2) Plot the particular finite volumes required
 # -------------------------------------------------
 
 rule plot_finite_volume:
@@ -405,6 +406,13 @@ rule plot_finite_volume:
         "--am {wildcards.am} "
         "--beta {wildcards.beta} "
         "--output_file {output}"
+
+rule make_finite_volume_plots:
+    input:
+        "assets/plots/finite-volume/finite_volume_am0.06_beta7.4.pdf",
+        "assets/plots/finite-volume/finite_volume_am0.02_beta7.4.pdf",
+        "assets/plots/finite-volume/finite_volume_am0.06_beta7.6.pdf",
+        "assets/plots/finite-volume/finite_volume_am0.02_beta7.6.pdf",
 
 # -------------------------------------------------
 # COPY INTERMEDIATE OUTPUT TO ASSETS:
