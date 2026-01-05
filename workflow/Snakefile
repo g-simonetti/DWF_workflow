@@ -14,6 +14,8 @@ configfile: "config/config.yaml"
 # -------------------------------------------------#
 
 
+# scans are different workflows
+# e.g. m_res, spectrum
 def load_and_expand(wildcards, pattern):
 
     yaml_file = f"metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml"
@@ -139,7 +141,7 @@ rule log_process:
 # -------------------------------------------------
 #  1) plots the residual mass as a function of
 #     - unphysical (alpha, M5, Ls, a5, mpv)
-#     - phyisical parameters (beta, m0)
+#     - physical parameters (beta, m0)
 #  2) plots the computational costs
 #  3) store the values of the residual mass and
 #     of the integrated autocorrelation time
@@ -376,6 +378,33 @@ rule plot_mps_mv:
         "--metadata_csv {input.metadata} "
         "--output_file {output}"
 
+
+# -------------------------------------------------
+# FINITE VOLUME RULS
+# -------------------------------------------------
+#  1) Plot m_ps against V for all finite volume 
+#   study ensembles
+# -------------------------------------------------
+
+rule plot_finite_volume:
+    input:
+        spectrum = lambda w: ensemble_files(w.subdir, "spectrum/spectrum.txt"),
+        wflow    = lambda w: ensemble_files(w.subdir, "wflow/summary.txt"),
+        metadata = "metadata/{subdir}/ensembles.csv",
+        script = "src/finite-volume/finite_volume_plot.py"
+    output:
+        "assets/plots/{subdir}/finite_volume_am{am}_beta{beta}.pdf"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/finite-volume/finite_volume_plot.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--metadata_csv {input.metadata} "
+        "--am {wildcards.am} "
+        "--beta {wildcards.beta} "
+        "--output_file {output}"
 
 # -------------------------------------------------
 # COPY INTERMEDIATE OUTPUT TO ASSETS:
