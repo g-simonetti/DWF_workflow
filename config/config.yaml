@@ -1,0 +1,4 @@
+plot_filetype: ".pdf"
+label: "yes"
+plot_styles: "styles/paperdraft.mplstyle"
+W0_reference: 0.28125
