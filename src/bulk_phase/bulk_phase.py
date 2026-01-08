@@ -9,262 +9,198 @@ from collections import defaultdict
 plt.style.use("tableau-colorblind10")
 
 # ------------------------------------------------------------
-# Parse arguments
+# Arguments
 # ------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Plot plaquette scans using metadata-driven grouping.")
-parser.add_argument("input", nargs="+", help="List of log_hmc_extract.txt files")   # >>> CHANGED
-parser.add_argument("--output_filename", required=True, help="Output plot filename")
-parser.add_argument("--label", type=str, default="no", help="Set to 'yes' to include legend")
-parser.add_argument("--plot_styles", default=None, help="Matplotlib style file to use")
-parser.add_argument("--scan", required=True, help="Scan parameter (a5, alpha, M5, mpv, merged, merged_m)")
-parser.add_argument("--metadata", required=True, help="YAML metadata file describing scan structure")
+parser = argparse.ArgumentParser(description="Bulk phase plotting tool.")
+
+parser.add_argument("--plaq_avg", nargs="+", help="log_hmc_extract.txt files")
+parser.add_argument("--plaq_history", nargs="+", help="plaq_history.txt files")
+
+parser.add_argument("--metadata", required=True)
+parser.add_argument("--label", default="no")
+parser.add_argument("--plot_styles", default=None)
+
+parser.add_argument("--bulk_merged", required=True)
+parser.add_argument("--bulk_single", required=True)
+
 args = parser.parse_args()
 
 show_legend = args.label.lower() == "yes"
-
 if args.plot_styles:
     plt.style.use(args.plot_styles)
 
 # ------------------------------------------------------------
-# Regex pattern for filepaths (IDENTICAL except filename)
+# Pattern for log_hmc_extract paths
 # ------------------------------------------------------------
 pattern = re.compile(
     r"Nt(?P<Nt>\d+)/Ns(?P<Ns>\d+)/Ls(?P<Ls>\d+)/"
     r"B(?P<beta>[0-9\.]+)/M(?P<mass>[0-9\.]+)/mpv(?P<mpv>[0-9\.]+)/"
     r"alpha(?P<alpha>[0-9\.]+)/a5(?P<a5>[0-9\.]+)/M5(?P<M5>[0-9\.]+)/"
-    r"hmc/log_hmc_extract\.txt"     # >>> CHANGED
+    r"hmc/log_hmc_extract\.txt"
 )
 
 # ------------------------------------------------------------
 # Load metadata
 # ------------------------------------------------------------
 with open(args.metadata, "r") as f:
-    metadata_entries = yaml.safe_load(f)
+    metadata = yaml.safe_load(f)
 
 # ------------------------------------------------------------
-# Load plaquette values
+# Load average plaquette
 # ------------------------------------------------------------
-def load_plaq(filepath):         # >>> CHANGED (replaces load_mres_fit)
+def load_plaq_avg(filepath):
     with open(filepath) as f:
         header = f.readline().split()
         values = f.readline().split()
     d = dict(zip(header, values))
-    return float(d["plaq"]), float(d["plaq_err"])    # >>> CHANGED
+    return float(d["plaq"]), float(d["plaq_err"])
 
 # ------------------------------------------------------------
-# Collect entries
+# Load plaquette history
 # ------------------------------------------------------------
-data_entries = []
-for filepath in args.input:
-    m = pattern.search(filepath)
+def load_plaq_history(filepath):
+    t, p = np.loadtxt(filepath, unpack=True)
+    return t, p
+
+# ------------------------------------------------------------
+# Parse entries from plaq_avg
+# ------------------------------------------------------------
+entries = []
+for fp in args.plaq_avg:
+    m = pattern.search(fp)
     if m is None:
-        raise ValueError(f"Cannot parse parameters from path: {filepath}")
+        raise ValueError(f"Cannot parse input path: {fp}")
 
     p = m.groupdict()
-    entry = {k: float(v) if k not in ["Nt", "Ns", "Ls"] else int(v) for k, v in p.items()}
-    entry["filepath"] = filepath
-    data_entries.append(entry)
+    e = {k: float(v) if k not in ["Nt", "Ns", "Ls"] else int(v)
+         for k, v in p.items()}
+    e["avg_path"] = fp
+    entries.append(e)
+
+# Attach matching plaq_history files
+if len(args.plaq_history) != len(entries):
+    raise ValueError("Mismatch: plaq_history count != plaq_avg count")
+
+for e, hist_fp in zip(entries, args.plaq_history):
+    e["history_path"] = hist_fp
 
 # ------------------------------------------------------------
-# Group entries (UNCHANGED)
+# NO FILTERING FOR MERGED PLOT
+# merged plot uses ALL masses
 # ------------------------------------------------------------
-def get_scan_groups(entries, metadata):
-    groups = defaultdict(list)
-
-    for block in metadata:
-        scan_param = next((k for k, v in block.items() if isinstance(v, list)), None)
-        if scan_param is None:
-            continue
-
-        fixed = {k: v for k, v in block.items() if not isinstance(v, list)}
-
-        subset = [
-            e for e in entries
-            if all(np.isclose(e[k], v) for k, v in fixed.items() if k in e)
-        ]
-
-        if subset:
-            groups[scan_param].append(subset)
-
-    return groups
-
-scan_groups = get_scan_groups(data_entries, metadata_entries)
+entries_full = list(entries)
 
 # ------------------------------------------------------------
-# Title formatting (IDENTICAL)
+# FILTER ONLY FOR HISTORY PLOT
 # ------------------------------------------------------------
-def make_legend_label(param, ref):
-    return rf"$am_0={ref['mass']}$"
+allowed_masses = {0.01, 0.10}
+entries_hist = [e for e in entries if np.isclose(e["mass"], list(allowed_masses)).any()]
 
-def make_subplot_title(param, ref):
-    alpha, a5, M5, mpv_val = ref["alpha"], ref["a5"], ref["M5"], ref["mpv"]
-
-    if param == "a5":
-        return rf"$\begin{{array}}{{c}} \alpha={alpha},\; am_5={M5}, \\ am_{{\mathrm{{PV}}}}={mpv_val} \\[6pt] \end{{array}}$"
-    elif param == "alpha":
-        return rf"$\begin{{array}}{{c}} a_5/a={a5},\; am_5={M5}, \\ am_{{\mathrm{{PV}}}}={mpv_val} \\[6pt] \end{{array}}$"
-    elif param == "M5":
-        return rf"$\begin{{array}}{{c}} \alpha={alpha},\; a_5/a={a5}, \\ am_{{\mathrm{{PV}}}}={mpv_val} \\[6pt] \end{{array}}$"
-    elif param == "mpv":
-        return rf"$\begin{{array}}{{c}} \alpha={alpha},\; a_5/a={a5}, \\  am_5={M5} \\[6pt] \end{{array}}$"
-    else:
-        return ""
-
-xlabels = { "mpv": r"$am_{\rm PV}$", "M5": r"$am_5$", "alpha": r"$\alpha$", "a5": r"$a_5/a$" }
+if len(entries_hist) == 0:
+    raise ValueError("No entries left after filtering masses for history plot")
 
 # ------------------------------------------------------------
-# MERGED (only load_plaq + ylabel changed)
+# Group by beta (for merged plot)
 # ------------------------------------------------------------
-def plot_merged(groups, outname):
-    colors = {"alpha": "C5", "a5": "C4", "M5": "C3", "mpv": "C1"}
+beta_groups_full = defaultdict(list)
+for e in entries_full:
+    beta_groups_full[e["beta"]].append(e)
 
-    fig, axes = plt.subplots(1, 4, figsize=(7, 2), sharey=True, layout="constrained")
-    params = ["alpha", "a5", "M5", "mpv"]
-
-    for i, param in enumerate(params):
-        ax = axes[i]
-
-        if param not in groups:
-            ax.axis("off")
-            continue
-
-        for subset in groups[param]:
-            x_vals, y_vals, y_err = [], [], []
-            for e in subset:
-                y, err = load_plaq(e["filepath"])         # >>> CHANGED
-                x_vals.append(e[param])
-                y_vals.append(y)
-                y_err.append(err)
-
-            xs, ys, es = zip(*sorted(zip(x_vals, y_vals, y_err)))
-
-            ref = subset[0]
-            marker = "o" if ref["Ls"] == 8 else "s"
-            color = colors[param]
-
-            mass_label = rf"$am_0={ref['mass']}$"
-
-            ax.set_title(make_subplot_title(param, ref), fontsize=8)
-            ax.errorbar(xs, ys, yerr=es, fmt=marker, mec=color, color=color, label=mass_label)
-            ax.plot(xs, ys, "--", color=color)
-
-            ax.set_xlabel(xlabels[param])
-            # keep original scale? For plaquette linear is correct, but if needed:
-            # ax.set_yscale("linear")
-
-        if i == 0:
-            ax.set_ylabel(r"$\langle P\rangle$")      # >>> CHANGED
-
-        if show_legend:
-            ax.legend(loc="upper center")
-
-    plt.savefig(outname, dpi=300)
-    plt.close()
+betas = sorted(beta_groups_full.keys())
 
 # ------------------------------------------------------------
-# MERGED-MASS (only load_plaq + ylabel changed, nothing else touched)
+# Group by beta (for history plot)
 # ------------------------------------------------------------
-def plot_merged_m(groups, outname):
-    colors = {"alpha": "C5", "a5": "C0", "M5": "C3", "mpv": "C1"}
-    
-    fig, axes = plt.subplots(1, 4, figsize=(7, 2), sharey=True, layout="constrained")
-    params = ["alpha", "a5", "M5", "mpv"]
-
-    for i, param in enumerate(params):
-        ax = axes[i]
-
-        if param not in groups:
-            ax.axis("off")
-            continue
-
-        mass_groups = defaultdict(list)
-        for subset in groups[param]:
-            mass_groups[subset[0]["mass"]].append(subset)
-
-        masses = sorted(mass_groups.keys())
-
-        for j, mass_value in enumerate(masses):
-            color = colors[param]
-            alpha_val = 0.5 if mass_value == 0.02 else 1.0
-            marker = "o" if j == 0 else "s"
-            mass_label = rf"$am_0={mass_value}$"
-
-            all_x = [e[param] for s in mass_groups[mass_value] for e in s]
-            span = max(all_x) - min(all_x) if len(all_x) > 1 else 1.0
-            dx = 0.01 * span * (-1 if j == 0 else +1)
-
-            for subset in mass_groups[mass_value]:
-
-                x_vals, y_vals, y_err = [], [], []
-                for e in subset:
-                    y, err = load_plaq(e["filepath"])   # >>> CHANGED
-                    x_vals.append(e[param] + dx)
-                    y_vals.append(y)
-                    y_err.append(err)
-
-                xs, ys, es = zip(*sorted(zip(x_vals, y_vals, y_err)))
-
-                if param == "mpv":
-                    subset = [e for e in subset if e["mass"] != 0.02]
-                if not subset:
-                    continue
-
-                ref_title = subset[0]
-
-                if param == "mpv" or j == 0:
-                    ax.set_title(make_subplot_title(param, ref_title), fontsize=8)
-
-                ax.errorbar(xs, ys, yerr=es, fmt=marker, mec=color, color=color, alpha=alpha_val, label=mass_label)
-                ax.plot(xs, ys, "--", alpha=alpha_val, color=color)
-
-        ax.set_xlabel(xlabels[param])
-        if i == 0:
-            ax.set_ylabel(r"$\langle P\rangle$")  # >>> CHANGED
-
-        if show_legend:
-            ax.legend(loc="best", fontsize=7)
-
-    plt.savefig(outname, dpi=300)
-    plt.close()
+beta_groups_hist = defaultdict(list)
+for e in entries_hist:
+    beta_groups_hist[e["beta"]].append(e)
 
 # ------------------------------------------------------------
-# SINGLE scan
+# ──────────────────────
+# PART 1: MERGED PLOT (all masses)
+# ──────────────────────
 # ------------------------------------------------------------
-def plot_single(scan_param, entries, outname):
 
-    x_vals, y_vals, y_err = [], [], []
+plt.figure(figsize=(3.5, 3), layout="constrained")
 
-    for e in entries:
-        y, err = load_plaq(e["filepath"])    # >>> CHANGED
-        x_vals.append(e[scan_param])
-        y_vals.append(y)
-        y_err.append(err)
+colors = [f"C{i}" for i in range(10)]
+markers = ["o", "s", "D", "^", "v", "<", ">"]
 
-    xs, ys, es = zip(*sorted(zip(x_vals, y_vals, y_err)))
+for i, beta in enumerate(betas):
+    group = beta_groups_full[beta]
 
-    ref = entries[0]
-    marker = "o" if ref["Ls"] == 8 else "s"
+    masses, plaquettes, errors = [], [], []
+    for e in group:
+        p, err = load_plaq_avg(e["avg_path"])
+        masses.append(e["mass"])
+        plaquettes.append(p)
+        errors.append(err)
 
-    plt.figure(figsize=(3.5, 2), layout="constrained")
+    masses, plaquettes, errors = zip(*sorted(zip(masses, plaquettes, errors)))
 
-    plt.errorbar(xs, ys, yerr=es, fmt=marker, mec="C0", color="C0")
-    plt.plot(xs, ys, "--", color="C0")
+    color = colors[i % len(colors)]
+    marker = markers[i % len(markers)]
 
-    plt.xlabel(xlabels.get(scan_param, scan_param))
-    plt.ylabel(r"$\langle P\rangle$")     # >>> CHANGED
+    plt.errorbar(
+        masses, plaquettes, yerr=errors,
+        fmt=marker, color=color, mec=color, label=rf"$\beta={beta}$"
+    )
+    plt.plot(masses, plaquettes, "--", color=color)
 
-    if show_legend:
-        plt.legend()
+plt.xlabel(r"$am_0$")
+plt.ylabel(r"$\langle P \rangle$")
+plt.ylim(0.5870, 0.6125)
+if show_legend:
+    plt.legend()
 
-    plt.savefig(outname)
-    plt.close()
+plt.savefig(args.bulk_merged, dpi=300)
+plt.close()
 
 # ------------------------------------------------------------
-# Dispatch (UNCHANGED)
+# ──────────────────────
+# PART 2: HISTORY MULTIPLOT (filtered masses only)
+# ──────────────────────
 # ------------------------------------------------------------
-if args.scan == "merged":
-    plot_merged(scan_groups, args.output_filename)
-elif args.scan == "merged_m":
-    plot_merged_m(scan_groups, args.output_filename)
-else:
-    plot_single(args.scan, scan_groups[args.scan][0], args.output_filename)
+
+betas_hist = sorted(beta_groups_hist.keys())
+n_beta = len(betas_hist)
+
+fig, axes = plt.subplots(
+    n_beta, 1,
+    figsize=(3.5, 3),
+    sharex=True,
+    layout="constrained"
+)
+
+if n_beta == 1:
+    axes = [axes]
+
+# Global minimal MC time
+t_min_global = np.inf
+for beta in betas_hist:
+    for e in beta_groups_hist[beta]:
+        t, _ = load_plaq_history(e["history_path"])
+        t_min_global = min(t_min_global, t.min())
+
+if not np.isfinite(t_min_global):
+    t_min_global = 0.0
+
+# Plot histories
+for i, (ax, beta) in enumerate(zip(axes, betas_hist)):
+    group = beta_groups_hist[beta]
+
+    for e in group:
+        t, p = load_plaq_history(e["history_path"])
+        ax.plot(t, p, alpha=0.5, label=rf"$am_0={e['mass']}$")
+
+    ax.set_ylabel(rf"$\mathcal{{P}}\;[\beta={beta}]$")
+
+    # Legend only in the top subplot
+    if show_legend and i == 0:
+        ax.legend(loc='upper right')
+
+axes[-1].set_xlabel("Monte Carlo time")
+axes[-1].set_xlim(left=t_min_global, right=7700)
+
+plt.savefig(args.bulk_single, dpi=300)
+plt.close()
