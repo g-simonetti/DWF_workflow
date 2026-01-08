@@ -34,37 +34,24 @@ def read_ptll_file(filename, n_elems=None):
 # ============================================================
 def bootstrap_ratio(data1, data2, n_boot=2000):
 
-    Ncfg = data1.shape[0]
-    T = data1.shape[1]
-
+    ratios_cfg = data1 / data2
+    Ncfg, T = ratios_cfg.shape
     ratios_boot = np.empty((n_boot, T))
 
     for b in range(n_boot):
-        # sample configuration indices with replacement
         idx = np.random.randint(0, Ncfg, size=Ncfg)
+        ratios_boot[b] = ratios_cfg[idx].mean(axis=0)
 
-        # bootstrap means
-        mean1 = data1[idx].mean(axis=0)
-        mean2 = data2[idx].mean(axis=0)
-
-        # ratio of bootstrap means
-        ratios_boot[b] = mean1 / mean2
-
-    # central value = ratio of original means
-    ratio_mean = data1.mean(axis=0) / data2.mean(axis=0)
-
-    # bootstrap standard deviation
+    ratio_mean = ratios_cfg.mean(axis=0)
     ratio_err = ratios_boot.std(axis=0, ddof=1)
 
-    return ratio_mean, ratio_err
-
+    return ratio_mean, ratio_err, ratios_cfg
 
 
 # ============================================================
-# Madras–Sokal Autocorrelation
+# Autocorrelation
 # ============================================================
 def integrated_autocorrelation_time(x, c=5.0, M_max=50):
-    """Madras–Sokal automatic window selection for τ_int."""
     x = np.asarray(x)
     n = len(x)
     if n < 2:
@@ -88,7 +75,7 @@ def integrated_autocorrelation_time(x, c=5.0, M_max=50):
 
 
 # ============================================================
-# Trajectory Number
+# Trajectory numbers
 # ============================================================
 def extract_trajectory_numbers(file_list, pattern=r".*\.([0-9]+)\.h5"):
     numbers = []
@@ -101,33 +88,30 @@ def extract_trajectory_numbers(file_list, pattern=r".*\.([0-9]+)\.h5"):
 
 
 # ============================================================
-# Plateau Fit
+# Bootstrap plateau fit 
 # ============================================================
-def plateau_fit(t, y, yerr, tmin, tmax):
-    """Weighted average + reduced chi²."""
-    mask = (t >= tmin) & (t <= tmax)
+def bootstrap_plateau(ratios_cfg, t_vals, tmin, tmax, n_boot=2000):
+    """
+    Bootstrap over configurations to get plateau value and error.
+    No covariance matrix needed.
+    """
+    Ncfg, T = ratios_cfg.shape
+    mask = (t_vals >= tmin) & (t_vals <= tmax)
     if not np.any(mask):
         raise ValueError(f"No points in plateau range {tmin}–{tmax}")
 
-    y_sel = y[mask]
-    yerr_sel = yerr[mask]
+    A = np.empty(n_boot)
 
-    weights = 1 / yerr_sel**2
-    avg = np.average(y_sel, weights=weights)
-    err = np.sqrt(1 / weights.sum())
+    for b in range(n_boot):
+        idx = np.random.randint(0, Ncfg, size=Ncfg)
+        Rb = ratios_cfg[idx].mean(axis=0)      # mean R(t) for this bootstrap sample
+        A[b] = Rb[mask].mean()                 # plateau average
 
-    chi2 = np.sum(((y_sel - avg) / yerr_sel) ** 2)
-    dof = len(y_sel) - 1
-    chi2_red = chi2 / dof if dof > 0 else np.nan
-
-    if chi2_red > 1:
-        err *= np.sqrt(chi2_red)
-
-    return avg, err, chi2_red
+    return A.mean(), A.std(ddof=1)
 
 
 # ============================================================
-# Main Script
+# Main Script 
 # ============================================================
 def main():
     parser = argparse.ArgumentParser(description="Compute residual mass from HDF5 data.")
@@ -142,9 +126,7 @@ def main():
     parser.add_argument("--beta", type=float, default="")
     parser.add_argument("--mass", type=float, default="")
 
-    # ====================================================
-    # NEW: parameters for title (minimal change)
-    # ====================================================
+    # NEW TITLE ARGS
     parser.add_argument("--alpha", type=float, required=True)
     parser.add_argument("--a5", type=float, required=True)
     parser.add_argument("--m5", type=float, required=True)
@@ -156,7 +138,7 @@ def main():
     plateau_end = int(round(args.plateau_end))
 
     # ----------------------------------------------------------
-    # Load HDF5 Data
+    # Load HDF5 Data 
     # ----------------------------------------------------------
     mres_files = sorted(glob.glob(os.path.join(args.input_dir, "mres.*.h5")))
     ptll_files = sorted(glob.glob(os.path.join(args.input_dir, "pt_ll.*.h5")))
@@ -168,20 +150,19 @@ def main():
     n_times = mres_data.shape[1]
     ptll_data = np.array([read_ptll_file(f, n_elems=n_times) for f in ptll_files])
 
-    # Match lengths
     min_len = min(len(mres_data), len(ptll_data))
     mres_data = mres_data[:min_len]
     ptll_data = ptll_data[:min_len]
 
     # ----------------------------------------------------------
-    # Bootstrap Ratio
+    # Bootstrap Ratio 
     # ----------------------------------------------------------
-    ratio_mean, ratio_err = bootstrap_ratio(mres_data, ptll_data)
+    ratio_mean, ratio_err, ratios_cfg = bootstrap_ratio(mres_data, ptll_data)
 
     # ----------------------------------------------------------
-    # Autocorrelation
+    # Autocorrelation 
     # ----------------------------------------------------------
-    ratio_t = mres_data / ptll_data
+    ratio_t = ratios_cfg
     tau_ints, tau_errs = [], []
     for t in range(n_times):
         tau, err = integrated_autocorrelation_time(ratio_t[:, t])
@@ -191,13 +172,13 @@ def main():
     tau_errs = np.array(tau_errs)
 
     # ----------------------------------------------------------
-    # Trajectories
+    # Trajectory numbers 
     # ----------------------------------------------------------
     traj_numbers = extract_trajectory_numbers(mres_files[:min_len])
     traj_spacing = int(round(np.mean(np.diff(traj_numbers)))) if len(traj_numbers) > 1 else 0
 
     # ----------------------------------------------------------
-    # Save m_res.txt
+    # Save m_res.txt 
     # ----------------------------------------------------------
     with open(args.output_file1, "w") as f:
         f.write("#t\tmres\tmres_err\ttau_int\ttau_int_err\ttraj_spacing\tn_traj\n")
@@ -208,18 +189,21 @@ def main():
                 f"{traj_spacing}\t{min_len}\n"
             )
 
-    # ----------------------------------------------------------
-    # Plateau Fit
-    # ----------------------------------------------------------
+    # ==========================================================
+    # Plateau Fit via Bootstrap 
+    # ==========================================================
     t_vals = np.arange(n_times)
-    avg, err, chi2_red = plateau_fit(t_vals, ratio_mean, ratio_err, plateau_start, plateau_end)
+    avg, err = bootstrap_plateau(ratios_cfg, t_vals, plateau_start, plateau_end)
 
+    # ----------------------------------------------------------
+    # Save m_res_fit.txt
+    # ----------------------------------------------------------
     with open(args.output_file2, "w") as f:
         f.write("#mres_fit\tmres_fit_err\treduced_chi2\tplateau_start\tplateau_end\n")
-        f.write(f"{avg:.6e}\t{err:.6e}\t{chi2_red:.3f}\t{plateau_start}\t{plateau_end}\n")
+        f.write(f"{avg:.6e}\t{err:.6e}\tNaN\t{plateau_start}\t{plateau_end}\n")
 
     # ----------------------------------------------------------
-    # Plot
+    # Plot 
     # ----------------------------------------------------------
     if args.plot_styles:
         plt.style.use(args.plot_styles)
@@ -229,9 +213,6 @@ def main():
     data_label = rf"$\beta={args.beta},\ am_0={args.mass}$" if args.label == "yes" else None
     fit_label = rf"$am_{{\rm res}}^{{\rm fit}} = {avg:.5f}\,\pm\,{err:.5f}$"
 
-    # ====================================================
-    # Title
-    # ====================================================
     title_str = (
         rf"$\alpha = {args.alpha},\ a_5/a = {args.a5},\ "
         rf"am_5 = {args.m5},\ am_{{\rm PV}} = {args.mpv}$"
@@ -241,18 +222,18 @@ def main():
     ax.errorbar(t_vals, ratio_mean, yerr=ratio_err, fmt="o", color="C4", label=data_label)
     ax.axvspan(plateau_start, plateau_end, color="C2", alpha=0.2, label="Plateau range")
 
-    ax.fill_between([plateau_start, plateau_end], [avg - err, avg - err], [avg + err, avg + err],
-        color="C1", alpha=0.25, linewidth=0)
+    ax.fill_between(
+        [plateau_start, plateau_end], [avg - err, avg - err], [avg + err, avg + err],
+        color="C1", alpha=0.25, linewidth=0
+    )
 
     ax.hlines(avg, plateau_start, plateau_end, color="C1", linestyle="--", label=fit_label)
 
     ax.set_xlabel("$t/a$")
     ax.set_ylabel("$am_{\\rm res}$")
 
-    # ---- Scientific notation for clean axis ----
     ax.yaxis.set_major_formatter(ScalarFormatter(useMathText=True))
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
-    #ax.set_ylim(0.3e-3, 2.3e-3)
 
     if data_label or fit_label:
         ax.legend()
