@@ -1,4 +1,7 @@
+plot_styles: "styles/jhep.mplstyle"
 plot_filetype: ".pdf"
-label: "yes"
-plot_styles: "styles/paperdraft.mplstyle"
 W0_reference: 0.28125
+label: "yes"
+therm: 150
+Nc: 2
+nF: 2
