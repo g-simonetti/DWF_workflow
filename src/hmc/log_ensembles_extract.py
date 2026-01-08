@@ -54,29 +54,19 @@ def bootstrap_mean_err(x, n_boot=1000, rng=None):
 
 
 def slice_therm_delta(x, therm, delta, n_conf):
-    """
-    Apply thermalization cut, subsample by delta, and return up to n_conf entries.
-
-    therm and delta are in "trajectory units" (same as in the Snakefile).
-    """
+    """Apply thermalization cut + subsampling."""
     x = np.asarray(x, dtype=float)
     if x.size == 0 or n_conf <= 0:
         return x[:0]
 
-    # Drop the first `therm` entries
     start = min(therm, x.size)
-
-    # Indices: start, start + delta, start + 2*delta, ...
     idx = start + delta * np.arange(n_conf, dtype=int)
-    idx = idx[idx < x.size]  # safety if x is shorter than expected
-
+    idx = idx[idx < x.size]
     return x[idx]
 
 
 def ms_autocorr_time(x, c=5.0):
-    """
-    Compute the Madras–Sokal integrated autocorrelation time and its analytic error.
-    """
+    """Madras–Sokal integrated autocorrelation time."""
     x = np.asarray(x, np.float64)
     n = x.size
     if n < 8:
@@ -87,7 +77,6 @@ def ms_autocorr_time(x, c=5.0):
     if not np.isfinite(var) or var <= 1e-15:
         return np.nan, np.nan
 
-    # FFT-based autocovariance
     nfft = 1 << (2 * n - 1).bit_length()
     fx = np.fft.rfft(x, nfft)
     acov = np.fft.irfft(fx * np.conjugate(fx), nfft)[:n]
@@ -95,7 +84,6 @@ def ms_autocorr_time(x, c=5.0):
     rho[np.isnan(rho)] = 0.0
     rho = np.clip(rho, -1.0, 1.0)
 
-    # Cut negative tail
     neg = np.where(rho < 0)[0]
     if len(neg) > 0:
         rho[neg[0]:] = 0.0
@@ -111,7 +99,7 @@ def ms_autocorr_time(x, c=5.0):
             break
         tau = new_tau
 
-    if not np.isfinite(tau) or tau <= 0.0:
+    if not np.isfinite(tau) or tau <= 0:
         return np.nan, np.nan
 
     tau_err = tau * np.sqrt((4 * (2 * W + 1)) / n)
@@ -124,15 +112,32 @@ def ms_autocorr_time(x, c=5.0):
 
 def extract_from_logs(log_dir):
     """Scan all log-*.zst files and extract observables."""
-    zst_paths = sorted(glob.glob(os.path.join(log_dir, "log-*.zst")))
-    if not zst_paths:
+
+    zst_files = glob.glob(os.path.join(log_dir, "log-*.zst"))
+
+    if not zst_files:
         raise FileNotFoundError(f"No log-*.zst files found under {log_dir}")
+
+    # Sort by (jobid, run)
+    zst_paths = sorted(
+        zst_files,
+        key=lambda s: (
+            int(os.path.basename(s)
+                .removeprefix("log-")
+                .split("-", 1)[0]),
+            int(os.path.basename(s)
+                .removeprefix("log-")
+                .split("-", 1)[1]
+                .split(".", 1)[0])
+        )
+    )
+
 
     acc, rej = 0, 0
     fullbcs_raw, fullbcs_incr = [], []
     traj_times = []
-    unsmeared_plaq = []        # list of (traj_idx, plaq_value)
-    traj_numbers = []          # list of trajectory numbers from "# Trajectory = N"
+    unsmeared_plaq = []
+    traj_numbers = []
     traj_length, md_steps = None, None
 
     # Regexes
@@ -143,14 +148,14 @@ def extract_from_logs(log_dir):
     re_traj_len = re.compile(r"\[Integrator\]\s*Trajectory length\s*:\s*([0-9.eE+-]+)")
     re_md_steps = re.compile(r"\[Integrator\]\s*Number of MD steps\s*:\s*(\d+)")
     re_plaq_val = re.compile(r"Plaquette:\s*\[\s*(\d+)\s*\]\s*([0-9.eE+-]+)")
-    re_traj_num = re.compile(r"#\s*Trajectory\s*=\s*(\d+)")  # from "Grid : HMC : ... # Trajectory = N"
+    re_traj_num = re.compile(r"#\s*Trajectory\s*=\s*(\d+)")
 
     want_unsmeared = False
     last_bcs = None
 
     for path in zst_paths:
         for line in read_zst_lines(path):
-            # Metropolis acceptance / rejection
+
             if re_acc.search(line):
                 acc += 1
                 continue
@@ -158,7 +163,6 @@ def extract_from_logs(log_dir):
                 rej += 1
                 continue
 
-            # Integrator info
             if (m := re_traj_len.search(line)):
                 traj_length = float(m.group(1))
                 continue
@@ -166,7 +170,6 @@ def extract_from_logs(log_dir):
                 md_steps = int(m.group(1))
                 continue
 
-            # Full BCs
             if (m := re_fullbcs.search(line)):
                 val = int(m.group(1))
                 fullbcs_raw.append(val)
@@ -177,17 +180,14 @@ def extract_from_logs(log_dir):
                 last_bcs = val
                 continue
 
-            # Trajectory time
             if (m := re_traj_time.search(line)):
                 traj_times.append(float(m.group(1)))
                 continue
 
-            # Trajectory number
             if (m := re_traj_num.search(line)):
                 traj_numbers.append(int(m.group(1)))
                 continue
 
-            # Plaquette sections
             if "Unsmeared plaquette" in line:
                 want_unsmeared = True
                 continue
@@ -195,9 +195,9 @@ def extract_from_logs(log_dir):
                 want_unsmeared = False
                 continue
             if want_unsmeared and (m := re_plaq_val.search(line)):
-                traj_idx = int(m.group(1))
-                val = float(m.group(2))
-                unsmeared_plaq.append((traj_idx, val))
+                ti = int(m.group(1))
+                pv = float(m.group(2))
+                unsmeared_plaq.append((ti, pv))
                 continue
 
     accept_ratio = acc / (acc + rej) if (acc + rej) > 0 else np.nan
@@ -217,97 +217,106 @@ def extract_from_logs(log_dir):
 
 
 # -----------------------------------------------------------------------------
-# Main entry point
+# Main
 # -----------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Extract HMC statistics from log-*.zst files.")
-    parser.add_argument("log_dir", help="Directory containing log-*.zst files")
-    parser.add_argument("--name", required=True, help="Ensemble name (added to output row).")
-    parser.add_argument("--therm", type=int, required=True, help="Thermalization cut (trajectories)")
-    parser.add_argument("--delta_traj", type=int, required=True, help="Subsampling stride (trajectories)")
-    parser.add_argument("--output_file", required=True, help="Output file path")
+    parser.add_argument("log_dir")
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--therm", type=int, required=True)
+    parser.add_argument("--delta_traj", type=int, required=True)
+
+    # NEW OUTPUT FILES
+    parser.add_argument("--hmc_extract", required=True)
+    parser.add_argument("--hmc_plaq", required=True)
+
     args = parser.parse_args()
 
     data = extract_from_logs(args.log_dir)
 
-    # --- Determine total number of trajectories from "# Trajectory = N" ---
+    # --- Determine trajectory range
     traj_numbers = data["traj_numbers"]
     if traj_numbers.size > 0:
         t_min = int(traj_numbers.min())
         t_max = int(traj_numbers.max())
         n_traj_total = t_max - t_min + 1
     else:
-        # Fallback: use lengths of other arrays (not ideal, but better than nothing)
-        lengths = [
-            data["fullbcs_raw"].size,
-            data["traj_times"].size,
-        ]
+        lengths = [data["fullbcs_raw"].size, data["traj_times"].size]
         n_traj_total = int(max(lengths)) if lengths else 0
         t_min = 0
 
-    # --- Build full plaquette time series including rejected steps ---
+    # --- Build full plaquette series
     plaq_pairs = data["plaq"]
     if plaq_pairs.size > 0:
         traj_idx = plaq_pairs[:, 0].astype(int)
         plaq_vals = plaq_pairs[:, 1].astype(float)
 
-        # Map trajectory indices to [0, n_traj_total)
-        # We assume plaq indices are consistent with traj_numbers
-        full_series = np.full(n_traj_total, np.nan, dtype=float)
+        full_series = np.full(n_traj_total, np.nan)
         for ti, pv in zip(traj_idx, plaq_vals):
             j = ti - t_min
             if 0 <= j < n_traj_total:
                 full_series[j] = pv
 
-        # Forward-fill missing plaquette entries
+        # Forward fill
         for i in range(1, n_traj_total):
             if np.isnan(full_series[i]):
                 full_series[i] = full_series[i - 1]
 
-        # Drop any leading NaNs (if we never saw a plaquette at the very start)
+        # Fill early segment if needed
         if np.isnan(full_series[0]):
             first_valid = np.where(~np.isnan(full_series))[0]
             if first_valid.size > 0:
                 full_series[:first_valid[0]] = full_series[first_valid[0]]
 
-        # Apply thermalization cut on trajectory index
-        if args.therm < n_traj_total:
-            plaq_post_therm_vals = full_series[args.therm:]
-        else:
-            plaq_post_therm_vals = np.array([], dtype=float)
+        # Post-therm for statistics
+        plaq_post_therm_vals = full_series[args.therm:]
     else:
-        plaq_post_therm_vals = np.array([], dtype=float)
+        full_series = np.array([])
+        plaq_post_therm_vals = np.array([])
 
-    # Average plaquette and bootstrap error (post-therm)
+    # -------------------------------------------------------------------------
+    # NEW: Write plaquette history = full series AFTER therm (NO delta_traj)
+    # -------------------------------------------------------------------------
+    os.makedirs(os.path.dirname(args.hmc_plaq), exist_ok=True)
+
+    if args.therm < len(full_series):
+        plaq_after_therm = full_series[args.therm:]
+    else:
+        plaq_after_therm = np.array([])
+
+    mc_times = np.arange(args.therm, args.therm + len(plaq_after_therm)) + t_min
+
+    with open(args.hmc_plaq, "w") as fpl:
+        for t, pv in zip(mc_times, plaq_after_therm):
+            if np.isfinite(pv):
+                fpl.write(f"{t} {pv:.10g}\n")
+
+    # -------------------------------------------------------------------------
+    # Continue with original behavior
+    # -------------------------------------------------------------------------
+
     plaq_mean, plaq_err = bootstrap_mean_err(plaq_post_therm_vals)
 
-    # --- Compute n_conf based on trajectory count, therm and delta_traj ---
     usable = max(0, n_traj_total - args.therm)
     n_conf = usable // args.delta_traj
 
-    # Slice other observables with the same therm and delta_traj
-    fullbcs_incr_s = slice_therm_delta(
-        data["fullbcs_incr"], args.therm, args.delta_traj, n_conf
-    )
-    traj_times_s = slice_therm_delta(
-        data["traj_times"], args.therm, args.delta_traj, n_conf
-    )
+    fullbcs_incr_s = slice_therm_delta(data["fullbcs_incr"], args.therm, args.delta_traj, n_conf)
+    traj_times_s = slice_therm_delta(data["traj_times"], args.therm, args.delta_traj, n_conf)
 
     fullbcs_mean, fullbcs_err = bootstrap_mean_err(fullbcs_incr_s)
-    bcs_mean, bcs_err = bootstrap_mean_err(fullbcs_incr_s)  # same quantity here
+    bcs_mean, bcs_err = bootstrap_mean_err(fullbcs_incr_s)
     ttraj_mean, ttraj_err = bootstrap_mean_err(traj_times_s)
 
-    # Plaquette autocorrelation time (post-therm)
     tau_est, tau_err = ms_autocorr_time(plaq_post_therm_vals)
 
     length_traj = data["traj_length"] if data["traj_length"] is not None else np.nan
     n_steps = data["md_steps"] if data["md_steps"] is not None else np.nan
     accept_ratio = data["accept_ratio"]
 
-    # --- Write output file ---
-    os.makedirs(os.path.dirname(args.output_file), exist_ok=True)
-    with open(args.output_file, "w") as f:
+    # --- Write stats file
+    os.makedirs(os.path.dirname(args.hmc_extract), exist_ok=True)
+    with open(args.hmc_extract, "w") as f:
         f.write(
             "name fullbcs fullbcs_err therm delta_traj n_conf "
             "bcs bcs_err t_traj t_traj_err "
@@ -315,7 +324,6 @@ def main():
             "tau_int_plaq tau_int_plaq_err "
             "length_traj n_steps accept_ratio\n"
         )
-
         f.write(
             f"{args.name} "
             f"{fullbcs_mean:.6g} {fullbcs_err:.6g} "
@@ -327,29 +335,9 @@ def main():
             f"{length_traj:.6g} {n_steps} {accept_ratio:.6g}\n"
         )
 
-    # --- Console summary ---
-    print(f"[log_ensembles_extract] wrote {args.output_file}")
-    print(f"  Ensemble name: {args.name}")
-    print(f"  Accept/Reject: {data['accept']}/{data['reject']} (ratio={accept_ratio:.3f})")
-    print(f"  Trajectories: t_min={t_min}, n_traj_total={n_traj_total}")
-    print(
-        f"  therm={args.therm}, delta_traj={args.delta_traj}, "
-        f"usable={usable}, n_conf={n_conf}"
-    )
-    print(
-        f"  fullbcs(incr)={fullbcs_mean:.6g}±{fullbcs_err:.6g}, "
-        f"bcs(incr)={bcs_mean:.6g}±{bcs_err:.6g}, "
-        f"t_traj={ttraj_mean:.6g}±{ttraj_err:.6g}, "
-        f"plaq={plaq_mean:.6g}±{plaq_err:.6g}, "
-        f"tau_plaq={tau_est:.6g}±{tau_err:.6g}, "
-        f"length_traj={length_traj}, n_steps={n_steps}, "
-        f"accept_ratio={accept_ratio:.3f}"
-    )
-
-    if np.isfinite(tau_est) and tau_est < args.delta_traj:
-        print(f"  ✅ decorrelation OK: tau_int={tau_est:.3g} < delta_traj={args.delta_traj}")
-    else:
-        print(f"  ⚠️ possible under-decorrelation: tau_int={tau_est:.3g}, delta_traj={args.delta_traj}")
+    # Console summary
+    print(f"[log_ensembles_extract] wrote {args.hmc_extract}")
+    print(f"[log_ensembles_extract] wrote {args.hmc_plaq}")
 
 
 if __name__ == "__main__":
