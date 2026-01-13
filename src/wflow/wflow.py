@@ -146,7 +146,7 @@ def load_all_logs(input_path):
         files = glob.glob(os.path.join(input_path, "wflow*.out"))
 
         # Sort by key
-        word = "wflow"
+        word = "wflow."
         ftype = ".out"
         files = sorted(files, key = lambda s : int(os.path.basename(s)[len(word) : -len(ftype)]))
 
