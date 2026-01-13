@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 from matplotlib.ticker import ScalarFormatter
 
 plt.style.use("tableau-colorblind10")
@@ -203,16 +204,29 @@ def main():
     X, Y, Yerr = map(np.array, (X, Y, Yerr))
 
     Ns_max_idx = np.argsort(X)[-1]
+
+    Ns = np.copy(X)
     X = X * Y[Ns_max_idx] # m_PS^inf * L
+
+    m_ps = Y[Ns_max_idx]
+    def fit_func(Ns, A):
+        return m_ps * (1 + A * (m_ps)**(3/2) / np.sqrt(Ns) * np.exp(-m_ps * Ns))
+
+    popt, pcov = curve_fit(fit_func, Ns, Y, sigma=Yerr)
 
 
     # ============================================================
     # Plot
     # ============================================================
     fig, ax = plt.subplots(figsize=(4.5, 2.5), layout="constrained")
-    used_labels = set()
+    used_labels = True #set()
 
-    ax.errorbar(X, Y, yerr=Yerr, ls="none", marker="o")
+    label = r"$\beta=$" + f"{BETA}, " + r"$am_0 =$" + f"{MASS}"
+    ax.errorbar(X, Y, yerr=Yerr, ls="none", marker="o", label=label)
+
+    xx = np.linspace(np.min(X), np.max(X))
+    ns = xx / Y[Ns_max_idx]
+    plt.plot(xx, fit_func(ns, *popt), "k--")
 
     ax.set_ylabel(r"$am_{PS}$")
     ax.set_xlabel(r"$m_{PS}^{inf} L$")
@@ -223,6 +237,7 @@ def main():
 
     if used_labels:
         ax.legend()
+
 
     plt.savefig(args.output_file, dpi=300)
     plt.close()
