@@ -14,6 +14,8 @@ configfile: "config/config.yaml"
 # -------------------------------------------------#
 
 
+# scans are different workflows
+# e.g. m_res, spectrum
 def load_and_expand(wildcards, pattern):
 
     yaml_file = f"metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml"
@@ -519,6 +521,41 @@ rule plot_mps_mv:
         "--metadata_csv {input.metadata} "
         "--output_file {output}"
 
+
+# -------------------------------------------------
+# FINITE VOLUME RULS
+# -------------------------------------------------
+#  1) Plot m_ps against V for all finite volume 
+#   study ensembles
+#  2) Plot the particular finite volumes required
+# -------------------------------------------------
+
+rule plot_finite_volume:
+    input:
+        spectrum = lambda w: ensemble_files(w.subdir, "spectrum/spectrum.txt"),
+        wflow    = lambda w: ensemble_files(w.subdir, "wflow/summary.txt"),
+        metadata = "metadata/{subdir}/ensembles.csv",
+        script = "src/finite-volume/finite_volume_plot.py"
+    output:
+        "assets/plots/{subdir}/finite_volume_am{am}_beta{beta}.pdf"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/finite-volume/finite_volume_plot.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--metadata_csv {input.metadata} "
+        "--am {wildcards.am} "
+        "--beta {wildcards.beta} "
+        "--output_file {output}"
+
+rule make_finite_volume_plots:
+    input:
+        "assets/plots/finite-volume/finite_volume_am0.06_beta7.4.pdf",
+        "assets/plots/finite-volume/finite_volume_am0.02_beta7.4.pdf",
+        "assets/plots/finite-volume/finite_volume_am0.06_beta7.6.pdf",
+        "assets/plots/finite-volume/finite_volume_am0.02_beta7.6.pdf",
 
 # -------------------------------------------------
 # COPY INTERMEDIATE OUTPUT TO ASSETS:
