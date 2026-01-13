@@ -134,6 +134,28 @@ def mw0_sq_and_error(am, am_err, w0_sq, w0_sq_err):
 
 
 # ============================================================
+# Label placement
+# ============================================================
+def place_label(fig, ax, x, y, text, pos):
+
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+
+    width = xlim[1] - xlim[0]
+    height = ylim[1] - ylim[0]
+
+    dx = 0.08 * np.cos(np.pi * pos) * width 
+    dy = 0.08 * np.sin(np.pi / 2 * pos) *  height 
+
+    xt = x + dx
+    yt = y + dy
+
+    ax.text(xt, yt, text, fontsize=7)#,
+            #ha="left",
+            #va="bottom")
+
+
+# ============================================================
 # Main
 # ============================================================
 def main():
@@ -203,12 +225,14 @@ def main():
 
     X, Y, Yerr = map(np.array, (X, Y, Yerr))
 
-    Ns_max_idx = np.argsort(X)[-1]
+    #Ns_max_idx = np.argsort(X)[-1]
+    idx = np.argsort(X)
+    X = X[idx]; Y = Y[idx]; Yerr = Yerr[idx];
 
     Ns = np.copy(X)
-    X = X * Y[Ns_max_idx] # m_PS^inf * L
+    X = X * Y[-1] # m_PS^inf * L
 
-    m_ps = Y[Ns_max_idx]
+    m_ps = Y[-1]
     def fit_func(Ns, A):
         return m_ps * (1 + A * (m_ps)**(3/2) / np.sqrt(Ns) * np.exp(-m_ps * Ns))
 
@@ -221,15 +245,23 @@ def main():
     fig, ax = plt.subplots(figsize=(4.5, 2.5), layout="constrained")
     used_labels = True #set()
 
-    label = r"$\beta=$" + f"{BETA}, " + r"$am_0 =$" + f"{MASS}"
+    label = rf"$\beta = {BETA}\, , am_0 = {MASS}$"
     ax.errorbar(X, Y, yerr=Yerr, ls="none", marker="o", label=label)
 
     xx = np.linspace(np.min(X), np.max(X))
-    ns = xx / Y[Ns_max_idx]
+    ns = xx / Y[-1]
     plt.plot(xx, fit_func(ns, *popt), "k--")
 
     ax.set_ylabel(r"$am_{PS}$")
     ax.set_xlabel(r"$m_{PS}^{inf} L$")
+
+    # Make N_s labels on points
+    for i in range(len(X)):
+
+        pos = i / (len(X)-1)
+        Ns_label = rf"$N_s={int(Ns[i])}$" 
+        place_label(fig, ax, X[i], Y[i], Ns_label, pos)
+    
 
     ax.ticklabel_format(style="sci", axis="both", scilimits=(0, 0))
     ax.xaxis.set_major_formatter(ScalarFormatter(useMathText=True))
@@ -239,7 +271,7 @@ def main():
         ax.legend()
 
 
-    plt.savefig(args.output_file, dpi=300)
+    plt.savefig(args.output_file, dpi=300, bbox_inches="tight")
     plt.close()
 
     print(f"✓ Saved plot → {args.output_file}")
