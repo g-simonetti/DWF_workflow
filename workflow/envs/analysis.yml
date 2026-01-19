@@ -1,0 +1,19 @@
+name: mdwf_analysis
+channels:
+  - conda-forge
+dependencies:
+  - pip=24.2
+  - python=3.12.6
+  - psutil
+  - jinja2
+  - pyyaml
+  - pip:
+      - h5py==3.11.0
+      - matplotlib==3.9.2
+      - numpy==2.1.1
+      - pandas==2.2.3
+      - scipy==1.14.1
+      - uncertainties==3.2.2
+      - corrfitter==8.2
+      - pyerrors==2.14.0
+      - zstandard==0.21.0
