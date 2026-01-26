@@ -1,6 +1,0 @@
-Assuming unrestricted shared filesystem usage.
-None
-host: S44-WPWNQ6CV
-Building DAG of jobs...
-MissingRuleException:
-No rule to produce intermediary_data/beta2.0/pg.plaquette.json.gz (if you use input functions make sure that they don't raise unexpected exceptions).

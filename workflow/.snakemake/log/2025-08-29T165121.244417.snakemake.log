@@ -1,9 +1,0 @@
-Assuming unrestricted shared filesystem usage.
-None
-host: S44-WPWNQ6CV
-Building DAG of jobs...
-MissingInputException in rule avg_plaquette2 in file "/Users/s2820577/Desktop/PhD/Snakemake/Practice/su2pg/workflow/Snakefile", line 19:
-Missing input files for rule avg_plaquette2:
-    output: intermediary_data/beta2.2/pg.plaquette.json.gz
-    affected files:
-        raw_data/beta2.2/out_pg
