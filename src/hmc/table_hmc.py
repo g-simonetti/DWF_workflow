@@ -29,17 +29,26 @@ def read_extract_file(path):
 
 
 def format_phys_err(value, error, ndigits_value=3):
-    """Physics-style error formatting (no space)."""
+    """Format as value(error) where error is printed as a float, e.g. 7.8(9.8)."""
     if not np.isfinite(value) or not np.isfinite(error):
         return "—"
+
+    error = abs(float(error))
+
     if error == 0:
         return f"{value:.{ndigits_value}g}"
 
-    exp = int(np.floor(np.log10(abs(error))))
-    digits = max(0, -exp + 1)
+    # Choose how many decimals to show based on the *error* scale (like your current code)
+    exp = int(np.floor(np.log10(error)))  # error ~ 10^exp
+    digits = max(0, -exp + 1)             # keep ~2 significant digits in error
+
+    # Print both with the same number of decimals
     value_str = f"{value:.{digits}f}"
-    err_scaled = int(round(error * 10**digits))
-    err_str = str(err_scaled).rstrip("0") or "0"
+    err_str = f"{error:.{digits}f}"
+
+    # Trim trailing zeros in the error (keeps "9.8", turns "9.80"->"9.8")
+    err_str = err_str.rstrip("0").rstrip(".") if "." in err_str else err_str
+
     return f"{value_str}({err_str})"
 
 
