@@ -116,12 +116,10 @@ for e in entries_hist:
     beta_groups_hist[e["beta"]].append(e)
 
 # ------------------------------------------------------------
-# ──────────────────────
 # PART 1: MERGED PLOT (all masses)
-# ──────────────────────
 # ------------------------------------------------------------
 
-plt.figure(figsize=(3.5, 3), layout="constrained")
+plt.figure(figsize=(7, 3), layout="constrained")
 
 colors = [f"C{i}" for i in range(10)]
 markers = ["o", "s", "D", "^", "v", "<", ">"]
@@ -149,17 +147,15 @@ for i, beta in enumerate(betas):
 
 plt.xlabel(r"$am_0$")
 plt.ylabel(r"$\langle P \rangle$")
-plt.ylim(0.5870, 0.6125)
+plt.ylim(0.36, 0.64)
 if show_legend:
-    plt.legend()
+    plt.legend(loc='upper right', ncol=4)
 
 plt.savefig(args.bulk_merged, dpi=300)
 plt.close()
 
 # ------------------------------------------------------------
-# ──────────────────────
-# PART 2: HISTORY MULTIPLOT (filtered masses only)
-# ──────────────────────
+# PART 2: HISTORY MULTIPLOT (only two masses)
 # ------------------------------------------------------------
 
 betas_hist = sorted(beta_groups_hist.keys())
@@ -186,7 +182,8 @@ if not np.isfinite(t_min_global):
     t_min_global = 0.0
 
 # Plot histories
-for i, (ax, beta) in enumerate(zip(axes, betas_hist)):
+for i, (ax, beta) in enumerate(zip(axes[::-1], betas_hist)):
+
     group = beta_groups_hist[beta]
 
     for e in group:
@@ -196,11 +193,11 @@ for i, (ax, beta) in enumerate(zip(axes, betas_hist)):
     ax.set_ylabel(rf"$\mathcal{{P}}\;[\beta={beta}]$")
 
     # Legend only in the top subplot
-    if show_legend and i == 0:
+    if show_legend and ax is axes[0]:
         ax.legend(loc='upper right')
 
 axes[-1].set_xlabel("Monte Carlo time")
-axes[-1].set_xlim(left=t_min_global, right=7700)
+axes[-1].set_xlim(left=t_min_global, right=6900)
 
 plt.savefig(args.bulk_single, dpi=300)
 plt.close()
