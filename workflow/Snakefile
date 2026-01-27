@@ -14,8 +14,6 @@ configfile: "config/config.yaml"
 # -------------------------------------------------#
 
 
-# scans are different workflows
-# e.g. m_res, spectrum
 def load_and_expand(wildcards, pattern):
 
     yaml_file = f"metadata/{wildcards.subdir}/{wildcards.ensembles_subdir}/ensembles_{wildcards.scan}.yaml"
@@ -99,7 +97,7 @@ rule m_res:
         "envs/analysis.yml",
     shell:
         (
-            "python src/residual_mass/residual_mass.py {input} "
+            "python src/residual_mass/residual_mass_plateau.py {input} "
             "--label {config[label]} "
             "--output_file1 {output.data} "
             "--output_file2 {output.fit} "
@@ -556,6 +554,7 @@ rule make_finite_volume_plots:
         "assets/plots/finite-volume/finite_volume_am0.02_beta7.4.pdf",
         "assets/plots/finite-volume/finite_volume_am0.06_beta7.6.pdf",
         "assets/plots/finite-volume/finite_volume_am0.02_beta7.6.pdf",
+
 
 # -------------------------------------------------
 # COPY INTERMEDIATE OUTPUT TO ASSETS:
