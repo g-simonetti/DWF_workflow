@@ -65,45 +65,64 @@ def slice_therm_delta(x, therm, delta, n_conf):
     return x[idx]
 
 
-def ms_autocorr_time(x, c=5.0):
-    """Madras–Sokal integrated autocorrelation time."""
+
+def ms_autocorr_time(x, c=4.0):
+    """Madras–Sokal integrated autocorrelation time (self-consistent window)."""
     x = np.asarray(x, np.float64)
     n = x.size
+    print(n)
     if n < 8:
         return np.nan, np.nan
 
+    # Center
     x = x - np.mean(x)
-    var = np.var(x)
-    if not np.isfinite(var) or var <= 1e-15:
+
+    # Variance check (use gamma(0) from data)
+    gamma0 = np.mean(x * x)
+    if not np.isfinite(gamma0) or gamma0 <= 1e-15:
         return np.nan, np.nan
 
+    # FFT autocovariance (raw sums), then convert to unbiased autocovariance gamma(t)
     nfft = 1 << (2 * n - 1).bit_length()
     fx = np.fft.rfft(x, nfft)
-    acov = np.fft.irfft(fx * np.conjugate(fx), nfft)[:n]
-    rho = np.real(acov / acov[0])
-    rho[np.isnan(rho)] = 0.0
+    acov_raw = np.fft.irfft(fx * np.conjugate(fx), nfft)[:n].real
+
+    # unbiased: gamma(t) = (sum_{i=0}^{n-t-1} x_i x_{i+t}) / (n - t)
+    denom = (n - np.arange(n)).astype(np.float64)
+    gamma = acov_raw / denom
+
+    # Normalized autocorrelation
+    rho = gamma / gamma[0]
+    rho[~np.isfinite(rho)] = 0.0
     rho = np.clip(rho, -1.0, 1.0)
 
-    neg = np.where(rho < 0)[0]
-    if len(neg) > 0:
-        rho[neg[0]:] = 0.0
-
+    # Self-consistent window iteration: W = floor(c * tau)
     tau = 0.5
+    W = 1
     for _ in range(1000):
         W = int(max(1, np.floor(c * tau)))
         if W >= n:
+            W = n - 1
             break
+
         new_tau = 0.5 + np.sum(rho[1:W + 1])
+
+        if not np.isfinite(new_tau) or new_tau <= 0:
+            return np.nan, np.nan
+
         if abs(new_tau - tau) < 1e-5:
             tau = new_tau
             break
+
         tau = new_tau
 
     if not np.isfinite(tau) or tau <= 0:
         return np.nan, np.nan
 
-    tau_err = tau * np.sqrt((4 * (2 * W + 1)) / n)
+    # Same style as your original error estimate
+    tau_err = tau * np.sqrt((4.0 * W + 2.0) / n)
     return float(tau), float(tau_err)
+
 
 
 # -----------------------------------------------------------------------------
@@ -276,7 +295,7 @@ def main():
         plaq_post_therm_vals = np.array([])
 
     # -------------------------------------------------------------------------
-    # NEW: Write plaquette history = full series AFTER therm (NO delta_traj)
+    # Write plaquette history = full series AFTER therm 
     # -------------------------------------------------------------------------
     os.makedirs(os.path.dirname(args.hmc_plaq), exist_ok=True)
 
@@ -291,10 +310,6 @@ def main():
         for t, pv in zip(mc_times, plaq_after_therm):
             if np.isfinite(pv):
                 fpl.write(f"{t} {pv:.10g}\n")
-
-    # -------------------------------------------------------------------------
-    # Continue with original behavior
-    # -------------------------------------------------------------------------
 
     plaq_mean, plaq_err = bootstrap_mean_err(plaq_post_therm_vals)
 
