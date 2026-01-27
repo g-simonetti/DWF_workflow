@@ -1,0 +1,5 @@
+raw_data/
+intermediary_data/
+assets/
+.snakemake/
+.DS_Store
