@@ -142,14 +142,7 @@ def load_all_logs(input_path):
         Q_conf   : 2D np.array of shape (N_conf, N_t)
     """
     if os.path.isdir(input_path):
-
-        files = glob.glob(os.path.join(input_path, "wflow*.out"))
-
-        # Sort by key
-        word = "wflow."
-        ftype = ".out"
-        files = sorted(files, key = lambda s : int(os.path.basename(s)[len(word) : -len(ftype)]))
-
+        files = sorted(glob.glob(os.path.join(input_path, "wflow*.out")))
         if not files:
             raise RuntimeError(f"No wflow-*.out files in directory '{input_path}'")
     else:
