@@ -25,6 +25,7 @@ def load_and_expand(wildcards, pattern):
         expand(
             pattern,
             subdir=wildcards.subdir,
+            NF    = ens["NF"],
             alpha = ens["alpha"],
             Nt    = ens["Nt"],
             Ns    = ens["Ns"],
@@ -41,7 +42,8 @@ def load_and_expand(wildcards, pattern):
 
 def find_query(wc):
     return (
-        f"Nt == {wc.Nt} "
+        f"nF == {wc.NF} "
+        f"and Nt == {wc.Nt} "
         f"and Ns == {wc.Ns} "
         f"and Ls == {wc.Ls} "
         f"and beta == {wc.beta} "
@@ -60,7 +62,7 @@ def ensemble_files(subdir, filename):
     paths = []
     for _, row in df.iterrows():
         paths.append(
-            f"intermediary_data/{subdir}/NF2/"
+            f"intermediary_data/{subdir}/NF{int(row['nF'])}/"
             f"Nt{int(row['Nt'])}/Ns{int(row['Ns'])}/Ls{int(row['Ls'])}/"
             f"B{row['beta']}/M{row['mass']}/"
             f"mpv{row['mpv']}/alpha{row['alpha']}/a5{row['a5']}/M5{row['M5']}/{filename}"
@@ -72,7 +74,8 @@ def ensemble_files(subdir, filename):
 # Rule 1: compute residual mass and the integrated |
 #         autocorrelation time for a given         |
 #         ensemble for every t/a                   |
-# Rule 2: reads the log files to extract the       |
+# Rule 2: Compute the PCAC mass                    |
+# Rule 3: reads the log files to extract the       |
 #         following quantities                     |
 #         - tau, n_steps, therm,                   |
 #         - n. gf CG app and t per traj.           |
@@ -82,12 +85,12 @@ def ensemble_files(subdir, filename):
 
 rule m_res:
     input:
-        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
     output:
-        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res.txt",
-        fit  = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt",
+        data = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res.txt",
+        fit  = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt",
         plot = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t",
             config["plot_filetype"],
         ),
     params:
@@ -116,12 +119,12 @@ rule m_res:
 
 rule m_pcac:
     input:
-        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
     output:
-        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/m_pcac.txt",
-        fit  = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/m_pcac_fit.txt",
+        data = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/m_pcac.txt",
+        fit  = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/m_pcac_fit.txt",
         plot = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/mpcac_t",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/mpcac_t",
             config["plot_filetype"],
         ),
     params:
@@ -151,10 +154,10 @@ rule m_pcac:
 
 rule log_process:
     input:
-        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
     output:
-        hmc_extract = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt",
-        hmc_plaq    = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/plaq_history.txt",
+        hmc_extract = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt",
+        hmc_plaq    = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/plaq_history.txt",
     conda:
         "envs/analysis.yml"
     params:
@@ -184,6 +187,9 @@ rule log_process:
 #  2) plots mres as a function of the number of
 #     CG applications and time elapsed for traj.
 #     to monitor the computational costs
+#  3) plots mres as a function of Ls and the
+#     residual mass as a function of the time 
+#     elapsed per trajectory.
 #          
 # -------------------------------------------------
 
@@ -193,7 +199,7 @@ rule plot_scans:
     input:
         lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
         ),
     output:
         "assets/plots/{subdir}/{ensembles_subdir}/mres_scan_{scan}.pdf",
@@ -213,11 +219,11 @@ rule plot_cost:
     input:
         mres = lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
         ),
         hmc = lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
         ),
     output:
         costs   = "assets/plots/{subdir}/{ensembles_subdir}/mres_scan_{scan}_CG_t.pdf",
@@ -238,11 +244,11 @@ rule plot_cost_Ls:
     input:
         mres = lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/m_res_fit.txt"
         ),
         hmc = lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
         ),
     output:
         ls_scan = "assets/plots/{subdir}/{ensembles_subdir}/mres_scan_{scan}_Ls.pdf",
@@ -339,7 +345,7 @@ rule plaq_scans:
     input:
         lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
         ),
     output:
         "assets/plots/{subdir}/{ensembles_subdir}/plaq_scan_{scan}.pdf",
@@ -359,11 +365,11 @@ rule bulk_phase:
     input:
         plaq_avg = lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/log_hmc_extract.txt"
         ),
         plaq_history = lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/plaq_history.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/plaq_history.txt"
         ),   
         
     output:
@@ -382,7 +388,6 @@ rule bulk_phase:
         "--plot_styles {config[plot_styles]}"
 
 
-
 # -------------------------------------------------
 # WILSON FLOW RULES:
 # -------------------------------------------------
@@ -393,12 +398,12 @@ rule bulk_phase:
 
 rule wflow:
     input:
-        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
     output:
-        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow.txt",
-        summary = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/summary.txt",
+        data = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow.txt",
+        summary = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/summary.txt",
         plot = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract",
             config["plot_filetype"],
         ),
     conda:
@@ -421,7 +426,7 @@ rule w0_scan:
     input:
         lambda wc: load_and_expand(
             wc,
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/summary.txt"
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/summary.txt"
         ),
     output:
         "assets/plots/{subdir}/{ensembles_subdir}/w0_beta_{scan}.pdf",
@@ -447,23 +452,23 @@ rule w0_scan:
 
 rule spectrum:
     input:
-        "raw_data/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/mesons"
     output:
-        data = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/spectrum.txt",
+        data = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/spectrum.txt",
         plot_ps = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot",
             config["plot_filetype"],
         ),
         plot_v  = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot",
             config["plot_filetype"],
         ),
         plot_fps  = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/fps_plot",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/fps_plot",
             config["plot_filetype"],
         ),
         plot_Z  = multiext(
-            "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/Z_plot",
+            "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/Z_plot",
             config["plot_filetype"],
         ),
     params:
@@ -568,7 +573,7 @@ rule make_finite_volume_plots:
 
 rule copy_mres_t_files_to_assets:
     input:
-        mres_t = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t.pdf",
+        mres_t = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t.pdf",
     output:
         mres_t_cp = "assets/plots/{subdir}/mres_t/B{beta}_M{mass}/"
                     "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/mres_t.pdf",
@@ -579,7 +584,7 @@ rule copy_mres_t_files_to_assets:
 
 rule copy_pcac_t_files_to_assets:
     input:
-        mpcac_t = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/mpcac_t.pdf",
+        mpcac_t = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/pcac_mass/mpcac_t.pdf",
     output:
         mpcac_t_cp = "assets/plots/{subdir}/mpcac_t/B{beta}_M{mass}/"
                     "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/mpcac_t.pdf",
@@ -591,7 +596,7 @@ rule copy_pcac_t_files_to_assets:
 
 rule copy_wflow_files_to_assets:
     input:
-        mres_t = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract.pdf",
+        mres_t = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract.pdf",
     output:
         mres_t_cp = "assets/plots/{subdir}/wflow/B{beta}_M{mass}/"
                     "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/w0_extract.pdf",
@@ -602,8 +607,8 @@ rule copy_wflow_files_to_assets:
 
 rule copy_spectrum_to_assets:
     input:
-        PS_fit = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot.pdf",
-        V_fit  = "intermediary_data/{subdir}/NF2/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot.pdf",
+        PS_fit = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot.pdf",
+        V_fit  = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot.pdf",
     output:
         PS_fit_cp = "assets/plots/{subdir}/mesons_fit/B{beta}_M{mass}/"
                     "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/ps_plot.pdf",
