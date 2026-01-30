@@ -96,14 +96,14 @@ def get_scan_groups(entries, metadata):
                 groups["Ls"].append(subset)
 
     # ------------------------------------------------------------
-    # ORIGINAL SCAN LOGIC (unchanged)
+    # ORIGINAL SCAN LOGIC
     # ------------------------------------------------------------
     for block in metadata:
         scan_param = next((k for k, v in block.items() if isinstance(v, list)), None)
         if scan_param is None:
             continue
 
-        fixed = {k: v for k, v in block.items() if not isinstance(v, list)}
+        fixed = {k: v for k, v in block.items() if (not isinstance(v, list)) and (k != "NF")}
 
         subset = [
             e for e in entries
