@@ -189,7 +189,7 @@ rule log_process:
 #     to monitor the computational costs
 #  3) plots mres as a function of Ls and the
 #     residual mass as a function of the time 
-#     elapsed per trajectory.
+#     elapsed per trajectory x tau_int
 #          
 # -------------------------------------------------
 

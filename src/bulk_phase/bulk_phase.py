@@ -6,8 +6,6 @@ import matplotlib.pyplot as plt
 import argparse
 from collections import defaultdict
 import matplotlib as mpl
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib import colors as mcolors
 
 # ------------------------------------------------------------
 # Style
@@ -65,6 +63,17 @@ def load_plaq_avg(filepath):
 def load_plaq_history(filepath):
     t, p = np.loadtxt(filepath, unpack=True)
     return t, p
+
+def derive_beta_plot_path(path: str) -> str:
+    """
+    Create a second output path without requiring a new CLI arg.
+    Example: bulk_merged.png -> bulk_merged_vs_beta.png
+    """
+    m = re.search(r"(\.[^.]+)$", path)
+    if m:
+        ext = m.group(1)
+        return path[: -len(ext)] + "_vs_beta" + ext
+    return path + "_vs_beta.png"
 
 # ------------------------------------------------------------
 # Parse input entries (now also reads NF from path)
@@ -133,50 +142,28 @@ betas = sorted(beta_groups_full)
 betas_hist = sorted(beta_groups_hist)
 
 # ------------------------------------------------------------
-# Color gradient: BLUE → RED (colorblind-friendly)
+# (1) Colormap: viridis
 # ------------------------------------------------------------
-
-c0 = mcolors.to_rgba("C5")
-c1 = mcolors.to_rgba("C1")
-c2 = mcolors.to_rgba("C2")
-c3 = mcolors.to_rgba("C4")
-c4 = mcolors.to_rgba("C0")
-c5 = mcolors.to_rgba("C3")
-
-cmap = LinearSegmentedColormap.from_list(
-    "tableau_asymmetric",
-    [
-        (0.00, c0),
-        (0.30, c1),
-        (0.60, c2),
-        (0.80, c3),
-        (0.90, c4),
-        (1.00, c5),
-    ],
-    N=256,
-)
+cmap = mpl.cm.get_cmap("viridis")
 
 n = len(betas)
 u = np.linspace(0, 1, n)
 
-# Gentler stretch (good balance)
+# keep your gentle nonlinear stretch
 vals = (np.exp(1.5 * u) - 1) / (np.exp(1.5) - 1)
-
 vals[-1] = 1.0
+
 beta_to_color = {b: cmap(v) for b, v in zip(betas, vals)}
-
-
-
 
 markers = ["o", "s", "D", "^", "v", "<", ">"]
 
 # ============================================================
 # PART 1 — MERGED PLOT (all masses for NF!=0)
-#   plus NF0 horizontal lines (same beta color)
+#   plus NF0 horizontal lines
 # ============================================================
-plt.figure(figsize=(7, 3), layout="constrained")
+fig, ax = plt.subplots(figsize=(7, 3), layout="constrained")
 
-# Track x-range to span the horizontal lines nicely
+# Track x-range (still useful for setting limits if you want)
 x_min, x_max = np.inf, -np.inf
 
 for i, beta in enumerate(betas):
@@ -197,7 +184,7 @@ for i, beta in enumerate(betas):
     color = beta_to_color[beta]
     marker = markers[i % len(markers)]
 
-    plt.errorbar(
+    ax.errorbar(
         masses,
         plaquettes,
         yerr=errors,
@@ -207,33 +194,85 @@ for i, beta in enumerate(betas):
         mec=color,
         mfc=color,
         label=rf"$\beta={beta}$",
+        zorder=2,
     )
 
-    plt.plot(masses, plaquettes, ":", color=color)
+    ax.plot(masses, plaquettes, ":", color=color, zorder=1)
 
-# NF0: horizontal solid lines at NF0 plaquette value for each beta found
-if np.isfinite(x_min) and np.isfinite(x_max) and x_min != x_max:
-    for beta, group0 in beta_groups_nf0.items():
-        if beta not in beta_to_color:
-            continue
-        color = beta_to_color[beta]
-        for e0 in group0:
-            p0, _ = load_plaq_avg(e0["avg_path"])
-            plt.hlines(p0, x_min, x_max, colors=[color], linestyles="-", alpha=0.9)
+# (2) NF0: horizontal lines using axhline; place them over points with zorder
+for beta, group0 in beta_groups_nf0.items():
+    if beta not in beta_to_color:
+        continue
+    color = beta_to_color[beta]
+    for e0 in group0:
+        p0, _ = load_plaq_avg(e0["avg_path"])
+        ax.axhline(
+            p0,
+            color=color,
+            linestyle="--",   # dashed
+            alpha=0.95,
+            linewidth=1.2,
+            zorder=5,         # ensure it sits over points
+        )
 
-plt.xlabel(r"$am_0$")
-plt.ylabel(r"$\langle P \rangle$")
-plt.ylim(0.36, 0.64)
+ax.set_xlabel(r"$am_0$")
+ax.set_ylabel(r"$\langle P \rangle$")
+ax.set_ylim(0.36, 0.64)
 
 if show_legend:
-    plt.legend(loc="upper right", ncol=4)
+    ax.legend(loc="upper right", ncol=4)
 
-plt.savefig(args.bulk_merged, dpi=300)
-plt.close()
+fig.savefig(args.bulk_merged, dpi=300)
+plt.close(fig)
+
+# ============================================================
+# PART 3 — NEW PLOT: <P> vs beta, labels are bare masses
+#   (auto output name derived from bulk_merged; no new CLI arg)
+# ============================================================
+beta_plot_path = derive_beta_plot_path(args.bulk_merged)
+
+# Organize NF!=0 averages by mass
+mass_groups = defaultdict(list)  # mass -> list of (beta, plaq, err)
+for beta in betas:
+    for e in beta_groups_full[beta]:
+        p, err = load_plaq_avg(e["avg_path"])
+        mass_groups[e["mass"]].append((beta, p, err))
+
+unique_masses = sorted(mass_groups.keys())
+cm_mass = mpl.cm.get_cmap("viridis", max(2, len(unique_masses)))
+
+fig, ax = plt.subplots(figsize=(6.5, 3.0), layout="constrained")
+
+for j, mass in enumerate(unique_masses):
+    triplets = sorted(mass_groups[mass], key=lambda t: t[0])
+    xb = [t[0] for t in triplets]
+    yp = [t[1] for t in triplets]
+    ye = [t[2] for t in triplets]
+
+    ax.errorbar(
+        xb,
+        yp,
+        yerr=ye,
+        fmt=markers[j % len(markers)],
+        linestyle=":",
+        color=cm_mass(j),
+        label=rf"$am_0={mass}$",
+        zorder=2,
+    )
+
+ax.set_xlabel(r"$\beta$")
+ax.set_ylabel(r"$\langle P \rangle$")
+ax.set_ylim(0.36, 0.64)
+
+if show_legend:
+    ax.legend(loc="best", ncol=3)
+
+fig.savefig(beta_plot_path, dpi=300)
+plt.close(fig)
 
 # ============================================================
 # PART 2 — HISTORY MULTIPLOT (two masses for NF!=0)
-#   plus NF0 horizontal lines (same beta color)
+#   plus NF0 horizontal lines (axhline)
 # ============================================================
 n_beta = len(betas_hist)
 
@@ -273,13 +312,21 @@ for ax, beta in zip(axes[::-1], betas_hist):
             alpha=0.6,
             linestyle=mass_linestyle.get(e["mass"], ":"),
             label=rf"$am_0={e['mass']}$",
+            zorder=1,
         )
 
-    # NF0: horizontal line at the NF0 plaquette for this beta, if present (already solid)
+    # NF0: horizontal line at the NF0 plaquette for this beta
     if beta in beta_groups_nf0:
         for e0 in beta_groups_nf0[beta]:
             p0, _ = load_plaq_avg(e0["avg_path"])
-            ax.axhline(p0, color=color, linestyle="-", alpha=0.9)
+            ax.axhline(
+                p0,
+                color=color,
+                linestyle="--",
+                alpha=0.95,
+                linewidth=1.2,
+                zorder=5,  # above traces
+            )
 
     ax.set_ylabel(rf"$\mathcal{{P}}\;[\beta={beta}]$")
 
@@ -289,5 +336,5 @@ for ax, beta in zip(axes[::-1], betas_hist):
 axes[-1].set_xlabel("Monte Carlo time")
 axes[-1].set_xlim(left=t_min_global, right=6900)
 
-plt.savefig(args.bulk_single, dpi=300)
-plt.close()
+fig.savefig(args.bulk_single, dpi=300)
+plt.close(fig)
