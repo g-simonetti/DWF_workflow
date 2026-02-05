@@ -165,7 +165,7 @@ rule log_process:
         delta = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="delta_traj"),
         name  = lambda wc: lookup( within = pandas.read_csv(f"metadata/{wc.subdir}/ensembles.csv"), query=find_query(wc), cols="name"),
     shell:
-        "python src/hmc/log_ensembles_extract.py {input} "
+        "python src/hmc/log_ensembles_extract_berg.py {input} "
         "--name {params.name} "
         "--therm {params.therm} "
         "--delta_traj {params.delta} "
@@ -576,7 +576,7 @@ rule copy_mres_t_files_to_assets:
         mres_t = "intermediary_data/{subdir}/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t.pdf",
     output:
         mres_t_cp = "assets/plots/{subdir}/mres_t/B{beta}_M{mass}/"
-                    "Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/mres_t.pdf",
+                    "NF{NF}_Nt{Nt}_Ns{Ns}_Ls{Ls}_mpv{mpv}_alpha{alpha}_a5{a5}_M5{M5}/mres_t.pdf",
     shell:
         """
         cp {input.mres_t} {output.mres_t_cp}
