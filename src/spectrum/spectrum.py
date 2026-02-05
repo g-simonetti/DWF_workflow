@@ -6,7 +6,7 @@ Computes:
   - pseudoscalar mass m_PS
   - vector mass m_V (avg over X, Y, Z)
   - f_PS from a simultaneous correlated fit of (PP, A0P)
-  - Z_A plateau from bootstrap
+  - Z_A plateau from constant fit
 
 Correlators used:
   PP:   C_PP(t)  = A^2/(2 m) * ( e^{-m t} + e^{-m (T-t)} )
@@ -26,14 +26,12 @@ Implementation note:
   Then:
       f_PS = sqrt(2) * g / sqrt(m)
 
-IMPORTANT USER REQUEST:
-  For extracting f_PS (simultaneous fit), use plateau_start_fps/plateau_end_fps
-  as the *same* window for BOTH PP and A0P.
+For extracting f_PS (simultaneous fit), use plateau_start_fps/plateau_end_fps
+as the *same* window for BOTH PP and A0P.
 
-USER REQUEST (PLOTTING EDITS ONLY):
+PLOTTING:
   - Effective masses are computed from FOLDED correlators (to match corrfitter's tp folding)
   - Plot effective mass points only for t < T/2
-  - Do NOT modify fits, Z_A, or output format/content (beyond the PS/fPS plot labels)
 """
 
 import argparse
@@ -48,6 +46,7 @@ from matplotlib.lines import Line2D
 
 import gvar as gv
 import corrfitter as cf
+import lsqfit
 
 plt.style.use("tableau-colorblind10")
 
@@ -97,20 +96,6 @@ def fold_antiperiodic(corr):
     partner = (T - t) % T
     return 0.5 * (C - C[..., partner])
 
-def _keep_lt_half(t, y, e, T):
-    """Keep only points with t < T/2 (plotting only)."""
-    half = T // 2
-    m = (t < half)
-    return t[m], y[m], e[m]
-
-def _finite_triplet(t, y, e):
-    """Drop nan/inf points (for safety in plots)."""
-    t = np.asarray(t)
-    y = np.asarray(y)
-    e = np.asarray(e)
-    m = np.isfinite(t) & np.isfinite(y) & np.isfinite(e)
-    return t[m], y[m], e[m]
-
 ##############################################################################
 #                           EFFECTIVE MASS                                   #
 ##############################################################################
@@ -158,9 +143,7 @@ def bootstrap_effmass(corr, n_boot, boot_idx):
     """
     N, T = corr.shape
 
-    # After folding, only t = 1 ... T//2 - 1 are meaningful
-    t_max = T // 2
-    t_vals = np.arange(1, t_max)
+    t_vals = np.arange(1, T//2+1)
 
     nt = len(t_vals)
     m_samples = np.full((n_boot, nt), np.nan, dtype=float)
@@ -192,6 +175,8 @@ def bootstrap_effmass(corr, n_boot, boot_idx):
             std[i]  = vals.std(ddof=1)
 
     return t_vals, mean, std
+
+
 
 
 ##############################################################################
@@ -231,15 +216,15 @@ def fit_PP_only(ps_samples, t0, t1, svdcut=1e-8):
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
-    prior["log(Afit)"] = gv.gvar([np.log(A0)], [3.0])     # broad
-    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [3.0])     # broad
+    prior["log(Afit)"] = gv.gvar([np.log(A0)], [3.0])
+    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [3.0])
 
     model = cf.Corr2(
         "PP",
         a="Afit", b="Afit", dE="m_ps",
         tp=+T,
         tdata=np.arange(T),
-        tfit=np.arange(t0, t1 + 1),
+        tfit=np.arange(t0, t1+1),
     )
 
     return cf.CorrFitter(models=[model]).lsqfit(data=data, prior=prior, svdcut=svdcut)
@@ -313,6 +298,37 @@ def fit_simultaneous_PP_A0P(ps_samples, a0p_samples, t0, t1, svdcut=1e-8):
 #                                   Z_A                                     #
 ##############################################################################
 
+def build_Z_samples(Lcorr, Rcorr, do_fold=True):
+    """
+    Build per-configuration Z_A(t) samples.
+
+    Inputs:
+      Lcorr, Rcorr: arrays (Ncfg, T)
+      do_fold: fold Z(t) per configuration using fold_ZA
+
+    Returns:
+      tvals: t = 1..T-2 (length T-2)
+      Z_samples: shape (Ncfg, T-2)
+    """
+    Lcorr = np.asarray(Lcorr)
+    Rcorr = np.asarray(Rcorr)
+    if Lcorr.shape != Rcorr.shape or Lcorr.ndim != 2:
+        raise ValueError("build_Z_samples expects Lcorr and Rcorr with shape (Ncfg, T)")
+
+    N, T = Lcorr.shape
+    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])   # 1..T-2
+    nt = len(tvals)
+
+    Z_samples = np.empty((N, nt), dtype=float)
+    for i in range(N):
+        _, Zi = compute_ZA(Lcorr[i], Rcorr[i])
+        if do_fold:
+            Zi = fold_ZA(Zi)
+        Z_samples[i] = Zi
+
+    return tvals, Z_samples
+
+
 def compute_ZA(L, R):
     L = np.asarray(L)
     R = np.asarray(R)
@@ -326,10 +342,6 @@ def compute_ZA(L, R):
         Lt = L[t]
         Ltp = L[t+1]
 
-        if Lt == 0 or (Lt + Ltp) == 0:
-            Z[i] = 0.0
-            continue
-
         term1 = (Rf + Rb) / (2 * Lt)
         term2 = 2 * Rf / (Lt + Ltp)
         Z[i] = 0.5 * (term1 + term2)
@@ -337,10 +349,8 @@ def compute_ZA(L, R):
 
 def fold_ZA(Z):
     """
-    Fold Z_A(t) defined on t = 1..T-2 (length T-2).
-    This is a periodic/cosh-like folding on the *reduced* time index:
-        Z(t) = Z(T - t)  -> in reduced indexing partner is (nt-1 - i).
-    Works with shape (..., nt).
+    Fold Z_A on the reduced domain t=1..T-2 by pairing
+    t <-> (T-1) - t
     """
     Z = np.asarray(Z)
     nt = Z.shape[-1]
@@ -348,45 +358,71 @@ def fold_ZA(Z):
     partner = (nt - 1 - i)
     return 0.5 * (Z + Z[..., partner])
 
-def bootstrap_ZA(Lcorr, Rcorr, t0, t1, n_boot, boot_idx):
+def fit_Z_only(Z_samples, t0, t1, svdcut=1e-8):
     """
-    Bootstrap Z_A plateau, but using the FOLDED Z_A(t) for both:
-      - the returned mean/std curve (for plotting)
-      - the plateau extraction over [t0,t1]
+    Correlated constant fit to Z(t) on [t0, t1].
+    Z_samples: (Ncfg, nt) with nt = T-2 corresponding to t=1..T-2.
+    """
+    Z_samples = np.asarray(Z_samples)
+    N, nt = Z_samples.shape
+    tvals = np.arange(1, nt + 1)
+
+    # correlated mean of the ensemble 
+    Zg = gv.dataset.avg_data({"Z": Z_samples})["Z"]
+
+    mask = (tvals >= t0) & (tvals <= t1)
+    if not np.any(mask):
+        raise ValueError(f"fit_Z_only: empty fit window [{t0},{t1}] for t=1..{nt}")
+
+    y = Zg[mask]
+
+    prior = gv.BufferDict()
+    prior["Z0"] = gv.gvar(1.0, 10.0)
+
+    def fcn(p):
+        return p["Z0"] * np.ones(len(y))
+
+    return lsqfit.nonlinear_fit(data=y, prior=prior, fcn=fcn, svdcut=svdcut)
+
+def bootstrap_ZA_curve(Lcorr, Rcorr, n_boot, boot_idx, do_fold=True):
+    """
+    Bootstrap mean/std of Z_A(t) for plotting
+
+    Returns:
+      tvals: t = 1..T-2
+      mean:  bootstrap mean of Z_A(t)
+      std:   bootstrap std  of Z_A(t)
     """
     Lcorr = np.asarray(Lcorr)
     Rcorr = np.asarray(Rcorr)
     N, T = Lcorr.shape
 
-    tvals0, _ = compute_ZA(Lcorr[0], Rcorr[0])
-    mask = (tvals0 >= t0) & (tvals0 <= t1)
-    nt = len(tvals0)
+    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])  # 1..T-2
+    nt = len(tvals)
 
-    Z_samp = np.zeros((n_boot, nt))
-    Zp = np.zeros(n_boot)
+    Zb = np.empty((n_boot, nt), dtype=float)
 
     for b in range(n_boot):
         idx = boot_idx[b]
-        Lm = Lcorr[idx].mean(0)
-        Rm = Rcorr[idx].mean(0)
+        Lm = Lcorr[idx].mean(axis=0)
+        Rm = Rcorr[idx].mean(axis=0)
+
         _, Zt = compute_ZA(Lm, Rm)
+        if do_fold:
+            Zt = fold_ZA(Zt)
 
-        # Fold Z_A(t) before storing / plateau extraction
-        Zt = fold_ZA(Zt)
+        Zb[b] = Zt
 
-        Z_samp[b] = Zt
-        Zp[b] = Zt[mask].mean()
+    return tvals, Zb.mean(axis=0), Zb.std(axis=0, ddof=1)
 
-    return tvals0, Z_samp.mean(0), Z_samp.std(0, ddof=1), Zp.mean(), Zp.std(ddof=1)
 
 ##############################################################################
 #                                  PLOTTING                                  #
 ##############################################################################
 
+
 def plot_plateau(t, y, e, t0, t1, fit, dfit, outfile, label_flag, beta, mass, qlabel, ylabel):
     fig, ax = plt.subplots(figsize=(3.5, 2.5), layout="constrained")
-
-    t, y, e = _finite_triplet(t, y, e)
 
     data_label = rf"$\beta={beta},\ am_0={mass}$" if label_flag == "yes" else None
     fit_label  = rf"${qlabel} = {fit:.5f}\pm{dfit:.5f}$"
@@ -433,10 +469,7 @@ def plot_fps_two_panel(
         sharex=True, layout="constrained"
     )
 
-    tps, meps, eeps  = _finite_triplet(tps, meps, eeps)
-    ta,  mea0p, ea0p = _finite_triplet(ta, mea0p, ea0p)
-
-    # Legend labels (same logic as plot_plateau)
+    # Legend labels 
     data_label = rf"$\beta={beta},\ am_0={mass}$" if label_flag == "yes" else None
     fit_label  = (
         rf"$am_{{\rm PS}} = {mps:.5f}\pm{dmps:.5f}$"
@@ -561,7 +594,7 @@ def main():
     rng = np.random.default_rng()
     boot_idx = rng.integers(0, N, size=(args.n_boot, N))
 
-    # Effective masses for plots: use folded correlators, and keep only t < T/2
+    # Effective masses for plots: use folded correlators
     ps_fold  = fold_periodic(ps)
     v_fold   = fold_periodic(v)
     a0p_fold = fold_antiperiodic(a0p)
@@ -570,11 +603,7 @@ def main():
     tv,  mev,  eev   = bootstrap_effmass(v_fold,   args.n_boot, boot_idx)
     ta,  mea0p, ea0p = bootstrap_effmass(a0p_fold, args.n_boot, boot_idx)
 
-    tps, meps, eeps  = _keep_lt_half(tps, meps, eeps, T)
-    tv,  mev,  eev   = _keep_lt_half(tv,  mev,  eev,  T)
-    ta,  mea0p, ea0p = _keep_lt_half(ta,  mea0p, ea0p, T)
-
-    # Fits unchanged (corrfitter folds internally via tp)
+    # Fits (corrfitter folds internally via tp)
     fit_pp  = fit_PP_only(ps, ps0, ps1, svdcut=args.svdcut)
     fit_vv  = fit_VV_only(v,  v0,  v1,  svdcut=args.svdcut)
     fit_sim = fit_simultaneous_PP_A0P(ps, a0p, fps0, fps1, svdcut=args.svdcut)
@@ -601,30 +630,46 @@ def main():
     dfPS = float(gv.sdev(fPS_gv))
     dfPS  = dfPS / args.Ns**1.5
 
-    # chi2/dof unchanged
+    # chi2/dof 
     chi2ps  = float(fit_pp.chi2  / fit_pp.dof)  if fit_pp.dof  > 0 else np.nan
+    print(fit_pp.dof)
+    print(fit_pp.svdn)
+
     chi2v   = float(fit_vv.chi2  / fit_vv.dof)  if fit_vv.dof  > 0 else np.nan
     chi2fps = float(fit_sim.chi2 / fit_sim.dof) if fit_sim.dof > 0 else np.nan
 
-    # Z_A unchanged (except now bootstrap uses folded Z_A(t) and returns folded curve)
-    tZ, Zt, Zerr, Zplat, dZ = bootstrap_ZA(Ls, Rs, z0, z1, args.n_boot, boot_idx)
+    # Z samples for the correlated constant fit (Ncfg x (T-2))
+    tZ_fit, Z_samples = build_Z_samples(Ls, Rs, do_fold=True)
 
-    # Restrict Z_A plot to t in [1, T/2 - 1)
-    z_plot_mask = tZ < (T // 2 - 1)
-    tZ   = tZ[z_plot_mask]
-    Zt   = Zt[z_plot_mask]
-    Zerr = Zerr[z_plot_mask]
+    # Bootstrap curve for plotting, like m_eff for PS/V plots
+    tZ_plot, Zt_plot, Zerr_plot = bootstrap_ZA_curve(
+        Ls, Rs, args.n_boot, boot_idx, do_fold=True
+    )
 
-    # Output unchanged (still writes SIM mps as your original code behavior)
+    # Correlated constant fit on [z0, z1]
+    fit_Z = fit_Z_only(Z_samples, z0, z1, svdcut=args.svdcut)
+    chi2Z = float(fit_Z.chi2 / fit_Z.dof) if fit_Z.dof > 0 else np.nan
+    Zplat_gv = fit_Z.p["Z0"]
+    Zplat = float(gv.mean(Zplat_gv))
+    dZ    = float(gv.sdev(Zplat_gv))
+
+    # Restrict Z_A plot to t in [1, T/2 - 1)x
+    z_plot_mask = tZ_plot < (T // 2 - 1)
+    tZ   = tZ_plot[z_plot_mask]
+    Zt   = Zt_plot[z_plot_mask]
+    Zerr = Zerr_plot[z_plot_mask]
+
+    # Output 
     with open(args.output_file, "w") as f:
         f.write("#am_ps am_ps_err am_v am_v_err chi2_ps chi2_v  "
-                "af_ps af_ps_err chi2_fps  Z_A Z_A_err\n")
+                "af_ps af_ps_err chi2_fps  Z_A Z_A_err chi2_Z\n")
+
         f.write(
             f"{mps_sim:.6e} {dmps_sim:.6e}  "
             f"{mv:.6e} {dmv:.6e}  "
             f"{chi2ps:.4e} {chi2v:.4e}  "
             f"{fPS:.6e} {dfPS:.6e} {chi2fps:.4e}  "
-            f"{Zplat:.6e} {dZ:.6e}\n"
+            f"{Zplat:.6e} {dZ:.6e} {chi2Z:.4e}\n"
         )
 
     # Plots (meff points are folded and limited to t < T/2)
@@ -642,7 +687,7 @@ def main():
         args.plot_fps, args.label, args.beta, args.mass
     )
 
-    # Z_A plot now shows folded Z_A(t) returned by bootstrap_ZA
+    # Z_A plot now shows folded Z_A(t)
     plot_plateau(tZ, Zt, Zerr, z0, z1, Zplat, dZ, args.plot_Z,
                  args.label, args.beta, args.mass,
                  "Z_A", r"$Z_A$")
