@@ -26,7 +26,6 @@ parser = argparse.ArgumentParser(
 
 parser.add_argument("--mres", nargs="+", required=True, help="m_res fit files (one per ensemble).")
 parser.add_argument("--hmc", nargs="+", required=True, help="log_hmc_extract.txt files (one per ensemble).")
-parser.add_argument("--metadata", required=True)  # kept for interface parity
 
 parser.add_argument("--label", default="no")
 parser.add_argument("--plot_styles", default=None)
