@@ -1,340 +1,191 @@
 #!/usr/bin/env python3
 import re
-import yaml
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
-from collections import defaultdict
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 import matplotlib as mpl
+import matplotlib.colors as mcolors
 
-# ------------------------------------------------------------
-# Style
-# ------------------------------------------------------------
-plt.style.use("tableau-colorblind10")
-
-# ------------------------------------------------------------
-# Arguments
-# ------------------------------------------------------------
+# ============================================================
+# COMMAND LINE INTERFACE (CLI)
+# ============================================================
 parser = argparse.ArgumentParser(description="Bulk phase plotting tool.")
-
-parser.add_argument("--plaq_avg", nargs="+", help="log_hmc_extract.txt files")
-parser.add_argument("--plaq_history", nargs="+", help="plaq_history.txt files")
-
-parser.add_argument("--metadata", required=True)
+parser.add_argument("--ensembles_csv", required=True)
+parser.add_argument("--plaq_avg", nargs="+", required=True)
+parser.add_argument("--plaq_history", nargs="*", default=[])
+parser.add_argument("--mres_data", nargs="*", default=[])
 parser.add_argument("--label", default="no")
 parser.add_argument("--plot_styles", default=None)
-
-parser.add_argument("--bulk_merged", required=True)
-parser.add_argument("--bulk_single", required=True)
+parser.add_argument("--tuned_masses", required=True)
+parser.add_argument("--tuned_history", required=True)
+parser.add_argument("--shamir_summary", required=True)
+parser.add_argument("--history_masses", nargs="*", type=float, default=[0.01, 0.10])
 
 args = parser.parse_args()
 
-show_legend = args.label.lower() == "yes"
-if args.plot_styles:
-    plt.style.use(args.plot_styles)
+show_legend = str(args.label).strip().lower() == "yes"
+plt.style.use(args.plot_styles if args.plot_styles else "tableau-colorblind10")
 
-# ------------------------------------------------------------
-# Path patterns (NF2-like and NF0-like)
-# ------------------------------------------------------------
-pattern_nf = re.compile(
-    r"NF(?P<NF>\d+)/"
-    r"Nt(?P<Nt>\d+)/Ns(?P<Ns>\d+)/Ls(?P<Ls>\d+)/"
-    r"B(?P<beta>[0-9\.]+)/M(?P<mass>[0-9\.]+)/mpv(?P<mpv>[0-9\.]+)/"
-    r"alpha(?P<alpha>[0-9\.]+)/a5(?P<a5>[0-9\.]+)/M5(?P<M5>[0-9\.]+)/"
-    r"hmc/log_hmc_extract\.txt"
-)
+# ============================================================
+# HELPERS
+# ============================================================
+def is_true(x): return str(x).strip().upper() in {"TRUE", "T", "1", "YES", "Y"}
+def sfloat(x): return str(float(str(x).strip()))
+def sint(x): return str(int(float(str(x).strip())))
 
-# ------------------------------------------------------------
-# Load metadata (kept; not used directly below, but preserved)
-# ------------------------------------------------------------
-with open(args.metadata, "r") as f:
-    metadata = yaml.safe_load(f)
+def make_dyn_key(NF, Nt, Ns, Ls, beta, mass, mpv, alpha, a5, M5):
+    return (sint(NF), sint(Nt), sint(Ns), sint(Ls), sfloat(beta), sfloat(mass), sfloat(mpv), sfloat(alpha), sfloat(a5), sfloat(M5))
 
-# ------------------------------------------------------------
-# I/O helpers
-# ------------------------------------------------------------
-def load_plaq_avg(filepath):
-    with open(filepath) as f:
-        header = f.readline().split()
-        values = f.readline().split()
-    d = dict(zip(header, values))
-    return float(d["plaq"]), float(d["plaq_err"])
+def load_val_err(filepath, key_name):
+    try:
+        with open(filepath) as f:
+            header = [h.lstrip('#') for h in f.readline().split()]
+            values = f.readline().split()
+        d = dict(zip(header, values))
+        val = float(d[key_name])
+        err = float(d.get(f"{key_name}_err", 0.0))
+        return val, err
+    except (Exception, KeyError, FileNotFoundError):
+        return np.nan, np.nan
 
-def load_plaq_history(filepath):
-    t, p = np.loadtxt(filepath, unpack=True)
-    return t, p
+def get_shaded_color(color, amount=0.4):
+    c = mcolors.to_rgb(color)
+    return tuple([c[i] + (1 - c[i]) * amount for i in range(3)])
 
-def derive_beta_plot_path(path: str) -> str:
-    """
-    Create a second output path without requiring a new CLI arg.
-    Example: bulk_merged.png -> bulk_merged_vs_beta.png
-    """
-    m = re.search(r"(\.[^.]+)$", path)
-    if m:
-        ext = m.group(1)
-        return path[: -len(ext)] + "_vs_beta" + ext
-    return path + "_vs_beta.png"
+FLOAT_TOKEN = r"[0-9]+(?:\.[0-9]+)?"
+PAT_DYN = re.compile(r".*/NF(?P<NF>\d+)/Nt(?P<Nt>\d+)/Ns(?P<Ns>\d+)/Ls(?P<Ls>\d+)/B(?P<beta>{FT})/M(?P<mass>{FT})/mpv(?P<mpv>{FT})/alpha(?P<alpha>{FT})/a5(?P<a5>{FT})/M5(?P<M5>{FT})/.*".format(FT=FLOAT_TOKEN))
+PAT_YM = re.compile(r".*/yang_mills/Nt(?P<Nt>\d+)/Ns(?P<Ns>\d+)/B(?P<beta>{FT})/.*".format(FT=FLOAT_TOKEN))
 
-# ------------------------------------------------------------
-# Parse input entries (now also reads NF from path)
-# ------------------------------------------------------------
-entries = []
+def parse_info(fp):
+    m = PAT_DYN.match(str(fp))
+    if m: return "dyn", make_dyn_key(**m.groupdict()), m.groupdict()
+    m = PAT_YM.match(str(fp))
+    if m: return "ym", (sint(m.group("Nt")), sint(m.group("Ns")), sfloat(m.group("beta"))), m.groupdict()
+    return None, None, None
+
+# ============================================================
+# DATA AGGREGATION
+# ============================================================
+df_meta = pd.read_csv(args.ensembles_csv, sep=r"\t|,", engine="python")
+meta_map = {make_dyn_key(r['NF'],r['Nt'],r['Ns'],r['Ls'],r['beta'],r['mass'],r['mpv'],r['alpha'],r['a5'],r['M5']): r 
+            for _, r in df_meta.iterrows() if not is_true(r.get("YM", False))}
+
+e_tuned, e_shamir, e_ym, e_mres = [], [], [], []
+
 for fp in args.plaq_avg:
-    m = pattern_nf.search(fp)
-    if m is None:
-        raise ValueError(f"Cannot parse input path: {fp}")
+    kind, key, g = parse_info(fp)
+    if kind == "ym": e_ym.append({"beta": float(g["beta"]), "path": fp})
+    elif key in meta_map:
+        m = meta_map[key]
+        if is_true(m.get("use_in_bulkphase_tuned")): e_tuned.append({"key": key, "beta": float(g["beta"]), "mass": float(g["mass"]), "path": fp})
+        if is_true(m.get("use_in_bulkphase_Shamir")): e_shamir.append({"key": key, "beta": float(g["beta"]), "mass": float(g["mass"]), "path": fp})
 
-    p = m.groupdict()
-    e = {
-        k: float(v) if k not in {"NF", "Nt", "Ns", "Ls"} else int(float(v))
-        for k, v in p.items()
-    }
-    e["avg_path"] = fp
-    entries.append(e)
+for fp in args.mres_data:
+    kind, key, g = parse_info(fp)
+    if key in meta_map and is_true(meta_map[key].get("use_in_bulkphase_mres")):
+        e_mres.append({"beta": float(g["beta"]), "mass": float(g["mass"]), "path": fp})
 
-# Attach histories
-if len(args.plaq_history) != len(entries):
-    raise ValueError("Mismatch: plaq_history count != plaq_avg count")
+hist_map = {parse_info(fp)[1]: fp for fp in args.plaq_history if parse_info(fp)[1]}
 
-for e, hist_fp in zip(entries, args.plaq_history):
-    e["history_path"] = hist_fp
-
-# ------------------------------------------------------------
-# Split datasets:
-#   - NF!=0: normal NF2-style points/curves
-#   - NF==0: draw as horizontal lines (one per beta)
-# ------------------------------------------------------------
-entries_nf0 = [e for e in entries if e.get("NF", None) == 0]
-entries_nfX = [e for e in entries if e.get("NF", None) != 0]  # "normal" ones
-
-if len(entries_nfX) == 0:
-    raise ValueError("No non-NF0 entries found (nothing to plot as points)")
-
-# For merged plot we use only NF!=0 series as before
-entries_full = list(entries_nfX)
-
-# For history plot we keep the same mass filter, but only for NF!=0
-allowed_masses = {0.01, 0.10}
-entries_hist = [
-    e for e in entries_nfX
-    if np.isclose(e["mass"], list(allowed_masses)).any()
-]
-if not entries_hist:
-    raise ValueError("No non-NF0 entries left after mass filtering for history plot")
-
-# ------------------------------------------------------------
-# Group by beta
-# ------------------------------------------------------------
-beta_groups_full = defaultdict(list)
-beta_groups_hist = defaultdict(list)
-beta_groups_nf0 = defaultdict(list)
-
-for e in entries_full:
-    beta_groups_full[e["beta"]].append(e)
-
-for e in entries_hist:
-    beta_groups_hist[e["beta"]].append(e)
-
-for e in entries_nf0:
-    beta_groups_nf0[e["beta"]].append(e)
-
-betas = sorted(beta_groups_full)
-betas_hist = sorted(beta_groups_hist)
-
-# ------------------------------------------------------------
-# (1) Colormap: viridis
-# ------------------------------------------------------------
-cmap = mpl.cm.get_cmap("viridis")
-
-n = len(betas)
-u = np.linspace(0, 1, n)
-
-# keep your gentle nonlinear stretch
-vals = (np.exp(1.5 * u) - 1) / (np.exp(1.5) - 1)
-vals[-1] = 1.0
-
-beta_to_color = {b: cmap(v) for b, v in zip(betas, vals)}
-
+all_betas = sorted(set([e["beta"] for e in e_tuned + e_shamir + e_ym]))
+beta_cmap = dict(zip(all_betas, mpl.cm.viridis_r(np.linspace(0, 1, len(all_betas)))))
 markers = ["o", "s", "D", "^", "v", "<", ">"]
 
-# ============================================================
-# PART 1 — MERGED PLOT (all masses for NF!=0)
-#   plus NF0 horizontal lines
-# ============================================================
-fig, ax = plt.subplots(figsize=(7, 3), layout="constrained")
+# ------------------------------------------------------------
+# FIG 1: Tuned Möbius <P> vs mass
+# ------------------------------------------------------------
+fig1, ax1 = plt.subplots(figsize=(3.5, 2.5), layout="constrained")
+for i, b in enumerate(sorted(set(e["beta"] for e in e_tuned))):
+    pts = []
+    for e in [x for x in e_tuned if x["beta"] == b]:
+        v, er = load_val_err(e["path"], "plaq")
+        if not np.isnan(v): pts.append((e["mass"], v, er))
+    if pts:
+        xs, ys, ye = zip(*sorted(pts))
+        # Restore dotted line style (":")
+        ax1.errorbar(xs, ys, yerr=ye, fmt=markers[i%len(markers)], ls=":", color=beta_cmap[b], label=rf"$\beta={b}$")
+ax1.set_xlabel(r"$am_0$"); ax1.set_ylabel(r"$\langle \mathcal{{P}} \rangle$")
+ax1.legend(fontsize='x-small', bbox_to_anchor=(1, 0.9))
+fig1.savefig(args.tuned_masses, dpi=300)
 
-# Track x-range (still useful for setting limits if you want)
-x_min, x_max = np.inf, -np.inf
+# ------------------------------------------------------------
+# FIG 2: Histories (Solid=Smallest, Dotted=Largest)
+# ------------------------------------------------------------
+h_mass_list = sorted(args.history_masses)
+h_betas = sorted(set(e["beta"] for e in e_tuned if e["key"] in hist_map))
+fig2, axes2 = plt.subplots(len(h_betas), 1, figsize=(3.5, 2.5), sharex=True, layout="constrained")
+if len(h_betas) == 1: axes2 = [axes2]
 
-for i, beta in enumerate(betas):
-    group = beta_groups_full[beta]
+for ax, b in zip(axes2[::-1], h_betas):
+    group = sorted([e for e in e_tuned if e["beta"] == b and any(np.isclose(e["mass"], m) for m in h_mass_list)], key=lambda x: x["mass"])
+    for j, e in enumerate(group):
+        t, p = np.loadtxt(hist_map[e["key"]], unpack=True)
+        ls = "-" if j == 0 else (":" if j == len(group)-1 else "-")
+        ax.plot(t, p, color=get_shaded_color(beta_cmap[b], 0.4*j), ls=ls, alpha=0.7, label=rf"$am_0={e['mass']}$")
+    ax.set_ylabel(rf"$ \mathcal{{P}} [\beta={b}]$")
+    if show_legend: ax.legend(loc="upper right", fontsize='xx-small', ncol=2)
+axes2[-1].set_xlabel("Monte Carlo time")
+axes2[-1].set_xlim(150,6900)
+fig2.savefig(args.tuned_history, dpi=300)
 
-    masses, plaquettes, errors = [], [], []
-    for e in group:
-        p, err = load_plaq_avg(e["avg_path"])
-        masses.append(e["mass"])
-        plaquettes.append(p)
-        errors.append(err)
+# ------------------------------------------------------------
+# FIG 3: Shamir Summary
+# ------------------------------------------------------------
+s_betas = sorted(set(e["beta"] for e in e_shamir))
+s_masses = sorted(set(e["mass"] for e in e_shamir))
+fig3, (sax1, sax2) = plt.subplots(1, 2, figsize=(7, 2.5), sharey=True, layout="constrained")
 
-    masses, plaquettes, errors = zip(*sorted(zip(masses, plaquettes, errors)))
+# Left Panel: Plaq vs Mass
+for i, b in enumerate(s_betas):
+    pts = []
+    for e in [x for x in e_shamir if x["beta"] == b]:
+        v, er = load_val_err(e["path"], "plaq")
+        if not np.isnan(v): pts.append((e["mass"], v, er))
+    if pts:
+        xs, ys, ye = zip(*sorted(pts))
+        # Restore dotted line style (":")
+        sax1.errorbar(xs, ys, yerr=ye, fmt=markers[i%len(markers)], ls=":", color=beta_cmap[b], label=rf"$\beta={b}$")
 
-    x_min = min(x_min, min(masses))
-    x_max = max(x_max, max(masses))
+for e in e_ym:
+    p, _ = load_val_err(e["path"], "plaq")
+    if not np.isnan(p) and e["beta"] in beta_cmap:
+        # Yang-Mills line is now solid ("-")
+        sax1.axhline(p, color=beta_cmap[e["beta"]], ls="-", alpha=0.5)
 
-    color = beta_to_color[beta]
-    marker = markers[i % len(markers)]
+# Right Panel: Plaq vs Beta & Mres vs Beta
+sax2_twin = sax2.twinx()
+m_cmap = mpl.cm.viridis_r(np.linspace(0, 1, len(s_masses)))
 
-    ax.errorbar(
-        masses,
-        plaquettes,
-        yerr=errors,
-        fmt=marker,
-        linestyle="none",
-        color=color,
-        mec=color,
-        mfc=color,
-        label=rf"$\beta={beta}$",
-        zorder=2,
-    )
+for i, m in enumerate(s_masses):
+    p_pts = []
+    for e in [x for x in e_shamir if x["mass"] == m]:
+        v, er = load_val_err(e["path"], "plaq")
+        if not np.isnan(v): p_pts.append((e["beta"], v, er))
+    if p_pts:
+        xb, yp, ye = zip(*sorted(p_pts))
+        sax2.errorbar(xb, yp, yerr=ye, fmt=markers[i%len(markers)], ls=":", color=m_cmap[i], label=rf"Plaq. $am_0={m}$")
+    
+    r_pts = []
+    for e in [x for x in e_mres if x["mass"] == m]:
+        v, er = load_val_err(e["path"], "mres_fit")
+        if not np.isnan(v): r_pts.append((e["beta"], v, er))
+    if r_pts:
+        xr, yr, yre = zip(*sorted(r_pts))
+        sax2_twin.errorbar(xr, yr, yerr=yre, fmt='x', ls='-', color=m_cmap[i], alpha=0.6, label=rf"$am_{{\rm res}} (am_0={m})$")
 
-    ax.plot(masses, plaquettes, ":", color=color, zorder=1)
+sax1.set_xlabel(r"$am_0$"); sax1.set_ylabel(r"$\langle P \rangle$")
+sax1.set_ylim(0.36,0.68)
 
-# (2) NF0: horizontal lines using axhline; place them over points with zorder
-for beta, group0 in beta_groups_nf0.items():
-    if beta not in beta_to_color:
-        continue
-    color = beta_to_color[beta]
-    for e0 in group0:
-        p0, _ = load_plaq_avg(e0["avg_path"])
-        ax.axhline(
-            p0,
-            color=color,
-            linestyle="--",   # dashed
-            alpha=0.95,
-            linewidth=1.2,
-            zorder=5,         # ensure it sits over points
-        )
-
-ax.set_xlabel(r"$am_0$")
-ax.set_ylabel(r"$\langle P \rangle$")
-ax.set_ylim(0.36, 0.64)
-
-if show_legend:
-    ax.legend(loc="upper right", ncol=4)
-
-fig.savefig(args.bulk_merged, dpi=300)
-plt.close(fig)
-
-# ============================================================
-# PART 3 — NEW PLOT: <P> vs beta, labels are bare masses
-#   (auto output name derived from bulk_merged; no new CLI arg)
-# ============================================================
-beta_plot_path = derive_beta_plot_path(args.bulk_merged)
-
-# Organize NF!=0 averages by mass
-mass_groups = defaultdict(list)  # mass -> list of (beta, plaq, err)
-for beta in betas:
-    for e in beta_groups_full[beta]:
-        p, err = load_plaq_avg(e["avg_path"])
-        mass_groups[e["mass"]].append((beta, p, err))
-
-unique_masses = sorted(mass_groups.keys())
-cm_mass = mpl.cm.get_cmap("viridis", max(2, len(unique_masses)))
-
-fig, ax = plt.subplots(figsize=(6.5, 3.0), layout="constrained")
-
-for j, mass in enumerate(unique_masses):
-    triplets = sorted(mass_groups[mass], key=lambda t: t[0])
-    xb = [t[0] for t in triplets]
-    yp = [t[1] for t in triplets]
-    ye = [t[2] for t in triplets]
-
-    ax.errorbar(
-        xb,
-        yp,
-        yerr=ye,
-        fmt=markers[j % len(markers)],
-        linestyle=":",
-        color=cm_mass(j),
-        label=rf"$am_0={mass}$",
-        zorder=2,
-    )
-
-ax.set_xlabel(r"$\beta$")
-ax.set_ylabel(r"$\langle P \rangle$")
-ax.set_ylim(0.36, 0.64)
+sax2.set_xlabel(r"$\beta$")
+sax2_twin.set_ylabel(r"$am_{\rm res}$", color='black') 
+sax2_twin.set_ylim(0.,0.145) 
+sax2.yaxis.set_tick_params(labelleft=False)
 
 if show_legend:
-    ax.legend(loc="best", ncol=3)
+    sax1.legend(ncol=4, loc='upper left', fontsize='xx-small')
+    sax2.legend(loc='upper left', fontsize='xx-small')
+    sax2_twin.legend(loc='lower center', fontsize='xx-small')
 
-fig.savefig(beta_plot_path, dpi=300)
-plt.close(fig)
-
-# ============================================================
-# PART 2 — HISTORY MULTIPLOT (two masses for NF!=0)
-#   plus NF0 horizontal lines (axhline)
-# ============================================================
-n_beta = len(betas_hist)
-
-fig, axes = plt.subplots(
-    n_beta, 1,
-    figsize=(3.5, 3),
-    sharex=True,
-    layout="constrained",
-)
-
-if n_beta == 1:
-    axes = [axes]
-
-# Global MC time minimum (based on NF!=0 histories, as before)
-t_min_global = np.inf
-for beta in betas_hist:
-    for e in beta_groups_hist[beta]:
-        t, _ = load_plaq_history(e["history_path"])
-        t_min_global = min(t_min_global, t.min())
-
-if not np.isfinite(t_min_global):
-    t_min_global = 0.0
-
-mass_linestyle = {0.01: ":", 0.10: ":"}
-
-# Plot (reverse so largest β appears on top)
-for ax, beta in zip(axes[::-1], betas_hist):
-    color = beta_to_color[beta]
-    group = sorted(beta_groups_hist[beta], key=lambda e: e["mass"])
-
-    for e in group:
-        t, p = load_plaq_history(e["history_path"])
-        ax.plot(
-            t,
-            p,
-            color=color,
-            alpha=0.6,
-            linestyle=mass_linestyle.get(e["mass"], ":"),
-            label=rf"$am_0={e['mass']}$",
-            zorder=1,
-        )
-
-    # NF0: horizontal line at the NF0 plaquette for this beta
-    if beta in beta_groups_nf0:
-        for e0 in beta_groups_nf0[beta]:
-            p0, _ = load_plaq_avg(e0["avg_path"])
-            ax.axhline(
-                p0,
-                color=color,
-                linestyle="--",
-                alpha=0.95,
-                linewidth=1.2,
-                zorder=5,  # above traces
-            )
-
-    ax.set_ylabel(rf"$\mathcal{{P}}\;[\beta={beta}]$")
-
-    if show_legend and ax is axes[0]:
-        ax.legend(loc="upper right")
-
-axes[-1].set_xlabel("Monte Carlo time")
-axes[-1].set_xlim(left=t_min_global, right=6900)
-
-fig.savefig(args.bulk_single, dpi=300)
-plt.close(fig)
+fig3.savefig(args.shamir_summary, dpi=300)
+plt.close('all')
