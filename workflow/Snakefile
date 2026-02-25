@@ -16,27 +16,27 @@ ENSEMBLES_DF = pandas.read_csv(
     "metadata/ensembles.csv",
     sep=r"\t|,",
     engine="python",
-)
+).convert_dtypes()
 
 
 # -------------------------------------------------#
 # Helpers                                           
 # -------------------------------------------------#
 
-def is_true(x):
-    return str(x).strip().upper() in {"TRUE", "T", "1", "YES", "Y"}
-
-
 def resolve_flag(wc, flag=None):
     """
     Default selection column is: use_in_{use}.
-
-    NOTE: keep {use} free of "/" to avoid weird column names and directory issues.
     """
     if flag is None:
-        return f"use_in_{wc.use}"
-    return flag.format(**wc)
-
+        # Use .get to avoid error if rule doesn't have {use} wildcard
+        use_val = getattr(wc, "use", "default") 
+        return f"use_in_{use_val}"
+    
+    # Safely format the flag string with wildcards
+    try:
+        return flag.format(**wc)
+    except KeyError:
+        return flag
 
 
 def load_and_expand(wc, pattern, flag=None):
@@ -46,24 +46,23 @@ def load_and_expand(wc, pattern, flag=None):
     if flagcol not in df.columns:
         raise ValueError(f"Column '{flagcol}' not found in metadata/ensembles.csv")
 
-    df_sel = df[df[flagcol].apply(is_true)]
+    df_sel = df[df[flagcol] == True]
 
     out = []
-
     for _, row in df_sel.iterrows():
-
-        # YM ensemble
-        if is_true(row["YM"]):
+        # Pure Yang–Mills ensemble (NF == 0)
+        if int(row["NF"]) == 0:
             out.extend(
                 expand(
                     pattern,
+                    NF=0,
                     Nt=int(row["Nt"]),
                     Ns=int(row["Ns"]),
                     beta=row["beta"],
                 )
             )
 
-        # Dynamical ensemble
+        # Dynamical ensemble (NF > 0)
         else:
             out.extend(
                 expand(
@@ -80,13 +79,10 @@ def load_and_expand(wc, pattern, flag=None):
                     M5=row["M5"],
                 )
             )
-
     return out
 
 
-
 def find_query(wc):
-
     # YM ensembles (no NF, Ls, etc.)
     if not hasattr(wc, "NF"):
         return (
@@ -96,7 +92,7 @@ def find_query(wc):
             f"and beta == {wc.beta}"
         )
 
-    # Dynamical ensembles (same as your original, just prefixed)
+    # Mobius/Shamir ensembles
     return (
         f"NF == {wc.NF} "
         f"and Nt == {wc.Nt} "
@@ -111,13 +107,22 @@ def find_query(wc):
     )
 
 
-
 def lookup(within, query, cols):
     df = within.query(query)
     if len(df) != 1:
         raise ValueError(f"lookup expected 1 row, got {len(df)} for query: {query}")
     return df.iloc[0][cols]
 
+
+def metadata_lookup(variable_name):
+    def metadata_lookup_inner(wildcards):
+        val = lookup(ENSEMBLES_DF, find_query(wildcards), variable_name)
+        # Check if the value is a Pandas <NA>, None, or NaN
+        if pandas.isna(val):
+            return -1  # Or whatever default your src/spectrum/spectrum.py expects for "auto"
+        return val
+
+    return metadata_lookup_inner
 
 # -------------------------------------------------#
 # Residual mass rules
@@ -126,7 +131,9 @@ def lookup(within, query, cols):
 # 2) Plots the residual mass as a function of 
 #    the unphysical parameters
 # 3) Plots the residual mass as a function of Ls 
-#    and time elapsed per trajectory                                            
+#    and time elapsed per trajectory  
+# 4) Plots residual mass as a function of t/a
+#    for different betas and bare masses                                          
 # -------------------------------------------------#
 
 
@@ -136,14 +143,10 @@ rule m_res:
         "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
         "mesons"
     output:
-        data =
+        mres_out =
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "residual_mass/m_res.txt",
-        fit  =
-            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "residual_mass/m_res_fit.txt",
+            "residual_mass/m_res.json",
         plot = multiext(
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
@@ -151,20 +154,23 @@ rule m_res:
             config["plot_filetype"],
         )
     params:
-        plateau_start = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "mres_p_start"),
-        plateau_end   = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "mres_p_end"),
+        plateau_start = metadata_lookup("mres_p_start"),
+        plateau_end   = metadata_lookup("mres_p_end"),
+        therm         = metadata_lookup("therm"),
+        delta_traj_ps = metadata_lookup("delta_traj_ps"),
     conda:
         "envs/analysis.yml"
     shell:
         (
             "python src/residual_mass/residual_mass_plateau.py {input} "
             "--label {config[label]} "
-            "--output_file1 {output.data} "
-            "--output_file2 {output.fit} "
+            "--mres_out {output.mres_out} "
             "--plot_file {output.plot} "
             "--plot_styles {config[plot_styles]} "
             "--plateau_start {params.plateau_start} "
             "--plateau_end {params.plateau_end} "
+            "--therm {params.therm} "
+            "--delta_traj_ps {params.delta_traj_ps} "
             "--beta {wildcards.beta} "
             "--mass {wildcards.mass} "
             "--alpha {wildcards.alpha} "
@@ -181,19 +187,20 @@ rule plot_mres_scan:
             wc,
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "residual_mass/m_res_fit.txt"
-        )
+            "residual_mass/m_res.json"
+        ),
     output:
         "assets/plots/parameter_scan/mres_{use}.pdf"
     conda:
         "envs/analysis.yml"
     shell:
-        (
-            "python src/parameter_scan/plot_mres_scan.py {input.mres} "
-            "--output_filename {output} "
-            "--label {config[label]} "
-            "--plot_styles {config[plot_styles]}"
-        )
+        "python src/parameter_scan/plot_mres_scan.py "
+        "--use {wildcards.use} "
+        "--mres {input.mres} "
+        "--output_filename {output} "
+        "--label {config[label]} "
+        "--plot_styles {config[plot_styles]}"
+
 
 
 
@@ -203,17 +210,17 @@ rule plot_cost_Ls:
             wc,
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "residual_mass/m_res_fit.txt"
+            "residual_mass/m_res.json"
         ),
         hmc=lambda wc: load_and_expand(
             wc,
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "hmc/log_hmc_extract.txt"
+            "hmc/log_hmc_extract.json"
         )
     output:
-        ls_scan="assets/plots/parameter_scan/mres_{use}_Shamir_vs_Mobius.pdf",
-        costs="assets/plots/parameter_scan/mres_{use}_Shamir_vs_Mobius_costs.pdf"
+        ls_scan="assets/plots/parameter_scan/Shamir_vs_Mobius_mres_{use}.pdf",
+        costs="assets/plots/parameter_scan/Shamir_vs_Mobius_costs_mres_{use}.pdf"
     conda:
         "envs/analysis.yml"
     shell:
@@ -230,61 +237,24 @@ rule plot_cost_Ls:
 # Log files analysis rules
 # -------------------------------------------------#
 # 1) Extract the average plaquette and its
-#    integrated autocorrelation time 
-# 2) Same for Yang-Mills                                       
+#    integrated autocorrelation time                                      
 # -------------------------------------------------#
 
 
 rule log_process:
     input:
-        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-        "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-        "log"
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/{subdir}/log"
     output:
-        hmc_extract =
-            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "hmc/log_hmc_extract.txt",
-        hmc_plaq =
-            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "hmc/plaq_history.txt",
+        hmc_out="intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/{subdir}/hmc/log_hmc_extract.json",
     conda:
         "envs/analysis.yml"
-    params:
-        therm = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "therm"),
-        delta = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "delta_traj"),
-        name  = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "name"),
     shell:
-        "python src/hmc/log_ensembles_extract_berg.py {input} "
-        "--name {params.name} "
-        "--therm {params.therm} "
-        "--delta_traj {params.delta} "
-        "--hmc_extract {output.hmc_extract} "
-        "--hmc_plaq {output.hmc_plaq}"
-
-
-rule log_process_YM:
-    input:
-        "raw_data/yang_mills/Nt{Nt}/Ns{Ns}/B{beta}/log"
-    output:
-        hmc_extract =
-            "intermediary_data/yang_mills/Nt{Nt}/Ns{Ns}/B{beta}/hmc/log_hmc_extract.txt",
-        hmc_plaq =
-            "intermediary_data/yang_mills/Nt{Nt}/Ns{Ns}/B{beta}/hmc/plaq_history.txt",
-    conda:
-        "envs/analysis.yml"
-    params:
-        therm = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "therm"),
-        delta = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "delta_traj"),
-        name  = lambda wc: lookup(ENSEMBLES_DF, find_query(wc), "name"),
-    shell:
-        "python src/hmc/log_ensembles_extract_berg.py {input} "
-        "--name {params.name} "
-        "--therm {params.therm} "
-        "--delta_traj {params.delta} "
-        "--hmc_extract {output.hmc_extract} "
-        "--hmc_plaq {output.hmc_plaq}"
+        (
+            "python src/hmc/log_ensembles_extract.py {input} "
+            "--ensembles_csv metadata/ensembles.csv "
+            "--plot_styles '{config[plot_styles]}' "
+            "--hmc_out {output.hmc_out}"
+        )
 
 
 # -------------------------------------------------#
@@ -292,72 +262,272 @@ rule log_process_YM:
 # -------------------------------------------------#
 # 1) Plots the average plaquette for tuned Mobius
 #    action as a function of the bare masses and 
-#    their HMC-time evolution
-# 2) Plots the average plaquette for Shamir 
+#    their HMC-time evolution.
+#    Plots the average plaquette for Shamir 
 #    action as a function of beta and the bare
-#    masses. Pure YM data are also shown                              
+#    masses. Pure YM data and residual mass
+#    data are also shown                              
 # -------------------------------------------------#
 
 
 rule bulk_phase:
     input:
-        ensembles_csv = "metadata/ensembles.csv",
-        # tuned Mobius
-        tuned_avg = lambda wc: load_and_expand(
-            wc, "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-                "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-                "hmc/log_hmc_extract.txt",
-            flag="use_in_bulkphase_tuned"
-        ),
+        ensembles_csv="metadata/ensembles.csv",
 
-        tuned_hist = lambda wc: load_and_expand(
-            wc, "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-                "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-                "hmc/plaq_history.txt",
-            flag="use_in_bulkphase_tuned"
+        # tuned Möbius
+        tuned_avg=lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "hmc/log_hmc_extract.json",
+            flag="use_in_bulkphase_tuned",
         ),
 
         # Shamir bulk phase
-        shamir_avg = lambda wc: load_and_expand(
-            wc, "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-                "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/hmc/"
-                "log_hmc_extract.txt",
-            flag="use_in_bulkphase_Shamir"
+        shamir_avg=lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "hmc/log_hmc_extract.json",
+            flag="use_in_bulkphase_Shamir",
         ),
 
-        # YM references
-        ym_avg = lambda wc: load_and_expand(
-            wc, "intermediary_data/yang_mills/Nt{Nt}/Ns{Ns}/B{beta}/"
-                "hmc/log_hmc_extract.txt",
-            flag="use_in_YM"
+        # YM references (NF0)
+        ym_avg=lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/B{beta}/"
+            "hmc/log_hmc_extract.json",
+            flag="use_in_YM",
         ),
 
         # mres Shamir
-        mres_shamir = lambda wc: load_and_expand(
-            wc, "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
-                "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-                "residual_mass/m_res_fit.txt",
-            flag="use_in_bulkphase_mres"
+        mres_shamir=lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "residual_mass/m_res.json",
+            flag="use_in_bulkphase_mres",
         ),
     output:
-        tuned_masses   = "assets/plots/bulk_phase/mobius_tuned_plaq_vs_mass.pdf",
-        tuned_history  = "assets/plots/bulk_phase/mobius_tuned_plaq_history.pdf",
-        shamir_summary = "assets/plots/bulk_phase/plaq_mass_beta_shamir.pdf",
+        tuned_masses="assets/plots/bulk_phase/mobius_tuned_plaq_vs_mass.pdf",
+        tuned_history="assets/plots/bulk_phase/mobius_tuned_plaq_history.pdf",
+        shamir_summary="assets/plots/bulk_phase/plaq_mass_beta_shamir.pdf",
     conda:
         "envs/analysis.yml"
     shell:
-        "python src/bulk_phase/bulk_phase.py "
-        "--ensembles_csv {input.ensembles_csv} "
-        "--plaq_avg {input.tuned_avg} {input.shamir_avg} {input.ym_avg} "
-        "--mres_data {input.mres_shamir} "
-        "--plaq_history {input.tuned_hist} "
-        "--label {config[label]} "
-        "--plot_styles {config[plot_styles]} "
-        "--tuned_masses {output.tuned_masses} "
-        "--tuned_history {output.tuned_history} "
-        "--shamir_summary {output.shamir_summary} "
+        (
+            "python src/bulk_phase/bulk_phase.py "
+            "--ensembles_csv {input.ensembles_csv} "
+            "--plaq_avg {input.tuned_avg} {input.shamir_avg} {input.ym_avg} "
+            "--mres_data {input.mres_shamir} "
+            "--label {config[label]} "
+            "--plot_styles '{config[plot_styles]}' "
+            "--tuned_masses {output.tuned_masses} "
+            "--tuned_history {output.tuned_history} "
+            "--shamir_summary {output.shamir_summary}"
+        )
 
 
+# -------------------------------------------------#
+# Spectrum
+# -------------------------------------------------#
+# 1) Plots the average plaquette for tuned Mobius
+#    action as a function of the bare masses and 
+#    their HMC-time evolution.
+#    Plots the average plaquette for Shamir 
+#    action as a function of beta and the bare
+#    masses. Pure YM data and residual mass
+#    data are also shown                              
+# -------------------------------------------------#
+
+
+rule spectrum:
+    input:
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+        "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+        "mesons"
+    output:
+        data =
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/spectrum.json",
+
+        plot_ps = multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/ps_plot",
+            config["plot_filetype"],
+        ),
+
+        plot_v = multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/v_plot",
+            config["plot_filetype"],
+        ),
+
+        plot_fps = multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/fps_plot",
+            config["plot_filetype"],
+        ),
+
+        plot_Z = multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/Z_plot",
+            config["plot_filetype"],
+        )
+    params:
+        plateau_start_ps  = metadata_lookup("ps_p_start"),
+        plateau_end_ps    = metadata_lookup("ps_p_end"),
+        plateau_start_v   = metadata_lookup("v_p_start"),
+        plateau_end_v     = metadata_lookup("v_p_end"),
+        plateau_start_fps = metadata_lookup("fps_p_start"),
+        plateau_end_fps   = metadata_lookup("fps_p_end"),
+        plateau_start_Z   = metadata_lookup("Z_p_start"),
+        plateau_end_Z     = metadata_lookup("Z_p_end"),
+        therm    = metadata_lookup("therm"),
+        delta_traj        = metadata_lookup("delta_traj_w0"),
+    conda:
+        "envs/analysis.yml"
+    shell:
+        (
+            "python src/spectrum/spectrum.py {input} "
+            "--label {config[label]} "
+            "--spectrum_out {output.data} "
+            "--plot_ps  {output.plot_ps} "
+            "--plot_v   {output.plot_v} "
+            "--plot_fps {output.plot_fps} "
+            "--plot_Z   {output.plot_Z} "
+            "--plot_styles {config[plot_styles]} "
+            "--plateau_start_ps {params.plateau_start_ps} "
+            "--plateau_end_ps {params.plateau_end_ps} "
+            "--plateau_start_v {params.plateau_start_v} "
+            "--plateau_end_v {params.plateau_end_v} "
+            "--plateau_start_fps {params.plateau_start_fps} "
+            "--plateau_end_fps {params.plateau_end_fps} "
+            "--plateau_start_Z {params.plateau_start_Z} "
+            "--plateau_end_Z {params.plateau_end_Z} "
+            "--therm {params.therm} "
+            "--delta_traj {params.delta_traj} "
+            "--beta {wildcards.beta} "
+            "--mass {wildcards.mass} "
+            "--Ns {wildcards.Ns}"
+        )
+
+
+# -------------------------------------------------
+# WILSON FLOW RULES:
+# -------------------------------------------------
+#  1) Wilson flow rule for the extraction of w0
+#     and the topological charge. It calls 
+#     the tau_int script to compute the
+#     integrated autocorrelation time.   
+# -------------------------------------------------
+
+
+rule wflow:
+    input:
+        "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/log"
+    output:
+        summary="intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow_extract.json",
+        plot_wflow=multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/w0_extract",
+            config["plot_filetype"]),
+        plot_q0=multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/topcharge_0",
+            config["plot_filetype"]),
+        plot_qw0=multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/topcharge_w0",
+            config["plot_filetype"]),
+    conda:
+        "envs/analysis.yml"
+    params:
+        therm=metadata_lookup("therm"),
+        delta_traj_w=metadata_lookup("delta_traj_w0"),
+        delta_traj_q=metadata_lookup("delta_traj_w0"),
+    shell:
+        (
+            "python src/wflow/wflow.py {input} "
+            "--label {config[label]} "
+            "--W0 {config[W0_reference]} "
+            "--wflow_out {output.summary} "
+            "--plot_wflow {output.plot_wflow} "
+            "--plot_q0 {output.plot_q0} "
+            "--plot_qw0 {output.plot_qw0} "
+            "--plot_styles '{config[plot_styles]}' "
+            "--beta {wildcards.beta} "
+            "--mass {wildcards.mass} "
+            "--therm {params.therm} "
+            "--delta_traj_w {params.delta_traj_w} "
+            "--delta_traj_q {params.delta_traj_q}"
+        )
+
+
+
+# -------------------------------------------------#
+# Table rules
+# -------------------------------------------------#
+# 1) Spectrum table                              
+# 2) Ensemble table (with mres)
+# -------------------------------------------------#
+
+rule table_spectrum:
+    input:
+        spectrum = lambda wc: load_and_expand(
+            wc, 
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/spectrum.json",
+            flag="use_in_spectrum"
+        ),
+        wflow = lambda wc: load_and_expand(
+            wc, 
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow_extract.json",
+            flag="use_in_spectrum"
+        ),
+        metadata = "metadata/ensembles.csv"
+    output:
+        table = "assets/tables/table_spectrum.tex"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/spectrum/spectrum_table.py "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--metadata_csv {input.metadata} "
+        "--output_file {output.table}"
+
+
+
+
+
+# -------------------------------------------------#
+# Copy to assets
+# -------------------------------------------------#
+# 1) Spectrum plots
+# 2) mres plots                           
+# -------------------------------------------------#
+
+
+rule copy_spectrum_to_assets:
+    input:
+        PS_fit="intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/ps_plot.pdf",
+        V_fit= "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/v_plot.pdf",
+    output:
+        PS_fit_cp=(
+            "assets/plots/spectrum/mesons_fits/"
+            "PS_NF{NF}_B{beta}M{mass}_Nt{Nt}Ns{Ns}Ls{Ls}_mpv{mpv}alpha{alpha}a5{a5}M5{M5}.pdf"
+        ),
+        V_fit_cp=(
+            "assets/plots/spectrum/mesons_fits/"
+            "V_NF{NF}_B{beta}M{mass}_Nt{Nt}Ns{Ns}Ls{Ls}_mpv{mpv}alpha{alpha}a5{a5}M5{M5}.pdf"
+        ),
+    shell:
+        r"""
+        cp "{input.PS_fit}" "{output.PS_fit_cp}"
+        cp "{input.V_fit}" "{output.V_fit_cp}"
+        """
 
 
 
