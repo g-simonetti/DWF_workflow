@@ -2,6 +2,7 @@
 import argparse
 import re
 from collections import defaultdict
+import json
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,7 +25,7 @@ parser = argparse.ArgumentParser(
     )
 )
 
-parser.add_argument("--mres", nargs="+", required=True, help="m_res fit files (one per ensemble).")
+parser.add_argument("--mres", nargs="+", required=True, help="m_res.json files (one per ensemble).")
 parser.add_argument("--hmc", nargs="+", required=True, help="log_hmc_extract.txt files (one per ensemble).")
 
 parser.add_argument("--label", default="no")
@@ -65,45 +66,63 @@ def params_key(p: dict):
 # ============================================================
 # Loaders
 # ============================================================
-def load_mres_fit(path: str):
-    arr = np.loadtxt(path, comments="#")
-    if arr.ndim == 1:
-        return float(arr[0]), float(arr[1])
-    return float(arr[0, 0]), float(arr[0, 1])
+def load_mres_extract(path: str):
+    """
+    Read plateau-extracted residual mass from m_res.json:
+      data["mres_extract"]["value"], data["mres_extract"]["error"]
+    """
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    try:
+        y = data["mres_extract"]["value"]
+        err = data["mres_extract"]["error"]
+    except Exception as e:
+        raise ValueError(
+            f"{path}: expected JSON with mres_extract.value and mres_extract.error"
+        ) from e
+
+    return float(y), float(err)
 
 
 def load_hmc_extract(path: str):
     """
-    Reads ONE-row log_hmc_extract.txt produced by your extractor.
+    Reads log_hmc_extract.json produced by the new extractor.
 
-    Expected columns include at least:
-      t_traj, t_traj_err, tau_int_plaq, tau_int_plaq_err
+    Expected keys:
+      data["hmc_extract"]["t_traj"]
+      data["hmc_extract"]["t_traj_err"]
+      data["hmc_extract"]["tau_int_plaq"]
+      data["hmc_extract"]["tau_int_plaq_err"]
+
+    Optional:
+      bcs, bcs_err, plaq, plaq_err (if present)
     """
-    arr = np.genfromtxt(path, names=True, dtype=None, encoding=None)
+    with open(path, "r") as f:
+        data = json.load(f)
 
-    # If multiple rows were passed, take the first row
-    if getattr(arr, "ndim", 0) != 0:
-        arr = arr[0]
+    if "hmc_extract" not in data or not isinstance(data["hmc_extract"], dict):
+        raise ValueError(f"{path}: expected JSON with top-level 'hmc_extract' object")
 
-    names = arr.dtype.names
+    h = data["hmc_extract"]
 
-    def get(name: str) -> float:
-        if name not in names:
-            raise ValueError(
-                f"Missing column '{name}' in {path}. Found columns: {names}"
-            )
-        return float(arr[name])
+    def get(name: str, required: bool = True, default=np.nan) -> float:
+        if name in h and h[name] is not None:
+            return float(h[name])
+        if required:
+            raise ValueError(f"{path}: missing required hmc_extract.{name}")
+        return float(default)
 
-    t_traj = get("t_traj")
-    t_traj_err = get("t_traj_err")
-    tau_int_plaq = get("tau_int_plaq")
-    tau_int_plaq_err = get("tau_int_plaq_err")
+    t_traj = get("t_traj", required=True)
+    t_traj_err = get("t_traj_err", required=True)
+    tau_int_plaq = get("tau_int_plaq", required=True)
+    tau_int_plaq_err = get("tau_int_plaq_err", required=True)
 
     # optional
-    bcs = float(arr["bcs"]) if "bcs" in names else np.nan
-    bcs_err = float(arr["bcs_err"]) if "bcs_err" in names else np.nan
-    plaq = float(arr["plaq"]) if "plaq" in names else np.nan
-    plaq_err = float(arr["plaq_err"]) if "plaq_err" in names else np.nan
+    bcs = get("bcs", required=False)
+    bcs_err = get("bcs_err", required=False)
+    plaq = get("plaq", required=False)
+    plaq_err = get("plaq_err", required=False)
 
     return {
         "t_traj": t_traj,
@@ -142,7 +161,7 @@ for fp in args.mres:
     if k not in hmc_lookup:
         raise ValueError(f"No matching HMC file for: {fp}")
 
-    mres, mres_err = load_mres_fit(fp)
+    mres, mres_err = load_mres_extract(fp)
     h = hmc_lookup[k]
 
     x_eff, x_eff_err = product_with_err(
