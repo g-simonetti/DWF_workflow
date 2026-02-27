@@ -4,3 +4,4 @@ intermediary_data/
 assets/
 .snakemake/
 .DS_Store
+__pycache__/
