@@ -391,6 +391,10 @@ def main():
     out_dir = os.path.dirname(os.path.abspath(args.hmc_out)) or "."
     os.makedirs(out_dir, exist_ok=True)
 
+    # Put all plaquette tau_int outputs (plots, fit output, etc.) in plaq/
+    plaq_out_dir = os.path.join(out_dir, "plaq")
+    os.makedirs(plaq_out_dir, exist_ok=True)
+
     # Stats (excluding tau_int until we compute it)
     n_traj_total = int(plaq_full.size)
     usable = max(0, n_traj_total - therm)
@@ -410,16 +414,17 @@ def main():
     accept_ratio = float(data["accept_ratio"]) if np.isfinite(data["accept_ratio"]) else np.nan
 
     # ---- Compute tau_int on plaquette full series via a TEMP series file ----
-    # compute_tau_from_file expects a text series file; we write one temp file here.
-    tmp_plaq_path = os.path.join(out_dir, "plaq_history_tmp_for_tau_int.txt")
+    # compute_tau_from_file expects a text series file; write it inside plaq/
+    tmp_plaq_path = os.path.join(plaq_out_dir, "plaq_history_tmp_for_tau_int.txt")
     with open(tmp_plaq_path, "w") as fpl:
+        fpl.write("# traj_number\tplaquette\n")
         for t, pv in zip(mc_times, plaq_full):
             if np.isfinite(pv):
-                fpl.write(f"{int(t)} {float(pv):.16e}\n")
+                fpl.write(f"{int(t)}\t{float(pv):.16e}\n")
 
     tau_int_plaq, tau_int_plaq_err, Nb_est, Nbs_est, found = compute_tau_from_file(
         input_file=tmp_plaq_path,
-        out_dir=out_dir,
+        out_dir=plaq_out_dir,
         therm=therm,
         plot_styles=args.plot_styles,
         base_name="tau_int",
@@ -466,15 +471,19 @@ def main():
             "forward_filled": True,
             "includes_pre_therm": True,
         },
-        # optional: helps debugging/repro
-        "tau_int_outputs_dir": out_dir,
+        "tau_int_outputs_dir": plaq_out_dir,
     }
 
     with open(args.hmc_out, "w") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
     print(f"[log_ensembles_extract] wrote JSON → {args.hmc_out}")
-
+    print(f"[log_ensembles_extract] tau_int outputs written in → {plaq_out_dir}")
+    print(
+        f"[log_ensembles_extract] plaq tau_int (Berg/2): "
+        f"{tau_int_plaq:.6g} ± {tau_int_plaq_err:.3g}  "
+        f"(Nb={Nb_est}, Nbs={Nbs_est}, found={bool(found)})"
+    )
 
 if __name__ == "__main__":
     main()
