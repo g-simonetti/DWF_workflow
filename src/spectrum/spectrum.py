@@ -2,43 +2,35 @@
 """
 spectrum.py — LQCD meson spectrum analysis using correlated fits (corrfitter).
 
-This program reads meson correlators from pt_ll.<num>.h5 and Ward-identity data
-from mres.<num>.h5 and computes (with correlated fits):
+This version keeps the overall structure of the original script, but rewrites
+PP / VV / simultaneous PP+A0P fits so they follow the corrfitter/gvar.dataset
+workflow more closely:
 
-  • a m_PS   (pseudoscalar mass)              from PP correlator
-  • a m_V    (vector mass)                    from VV correlator (spatially averaged)
-  • a f_PS   (pseudoscalar decay constant)    from a simultaneous PP + A0P fit
-  • Z_A      (axial renormalisation constant) from a correlated constant plateau fit
+Standard fit:
+    dset = ds.Dataset()
+    data = ds.avg_data(dset)
+    fit = fitter.lsqfit(prior=prior, data=data)
 
-Plots:
-  • Effective masses (bootstrap mean ± std) using the 3-point cosh estimator,
-    computed on the full valid range t = 1..T-2.
-  • Plateau bands on the chosen fit windows.
-  • Z_A(t) curve (bootstrap) and constant-fit plateau.
+Bootstrap fit:
+    bs_datalist = (ds.avg_data(d) for d in ds.bootstrap_iter(dset, n_boot))
+    for bs_fit in fitter.bootstrapped_fit_iter(bs_datalist):
+        p = bs_fit.pmean
+        ... collect bootstrap fit outputs ...
+    bs = ds.avg_data(bs, bstrap=True)
 
-Configuration selection (NEW):
-  The analysis uses only configurations whose *filename number* satisfies:
+Outputs written to JSON:
+  - standard_fit: correlated fit on the actual ensemble
+  - bootstrap_fit: bootstrap summary for PP, VV, simultaneous PP+A0P
 
-      num >= therm  and  (num - therm) % delta_traj == 0
-
-  where filenames are exactly:
-      pt_ll.<num>.h5
-      mres.<num>.h5
-
-  This is NOT list-index based. It uses the integer <num> parsed from filenames.
-
-Fits are unchanged:
-  • corrfitter models periodic/antiperiodic structure via tp = +T / tp = -T
-  • Fit windows are inclusive: t = plateau_start .. plateau_end
+Z_A remains a standard correlated plateau fit as in the original code.
 """
-
 
 import argparse
 import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import numpy as np
 import h5py
@@ -46,6 +38,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
 import gvar as gv
+import gvar.dataset as ds
 import corrfitter as cf
 import lsqfit
 
@@ -60,12 +53,23 @@ def read_meson_corr(filename, name):
         data = f[f"meson/{name}/corr"][:]
         return data["re"]
 
-def read_ps_corr(fname):      return read_meson_corr(fname, "meson_1")
-def read_vx_corr(fname):      return read_meson_corr(fname, "meson_50")
-def read_vy_corr(fname):      return read_meson_corr(fname, "meson_83")
-def read_vz_corr(fname):      return read_meson_corr(fname, "meson_116")
-def read_L_corr(fname):       return read_meson_corr(fname, "meson_33")  # A0,P
-def read_L2_corr(fname):      return read_meson_corr(fname, "meson_9")   # P,A0
+def read_ps_corr(fname):
+    return read_meson_corr(fname, "meson_1")
+
+def read_vx_corr(fname):
+    return read_meson_corr(fname, "meson_50")
+
+def read_vy_corr(fname):
+    return read_meson_corr(fname, "meson_83")
+
+def read_vz_corr(fname):
+    return read_meson_corr(fname, "meson_116")
+
+def read_L_corr(fname):
+    return read_meson_corr(fname, "meson_33")  # A0,P
+
+def read_L2_corr(fname):
+    return read_meson_corr(fname, "meson_9")   # P,A0
 
 def read_R_corr(fname):
     with h5py.File(fname, "r") as f:
@@ -88,17 +92,18 @@ def eff_mass_hyperbolic(C):
     R = np.maximum(R, 1.0)
     return t, np.arccosh(R)
 
+
 def bootstrap_effmass(corr, n_boot, boot_idx):
     """
-    Bootstrap effective mass for UNFOLDED correlators.
+    Bootstrap effective mass for unfolded correlators.
 
     Assumes corr has shape (Ncfg, T).
-    Effective mass is computed on the full valid range t = 1..T-2 (needs t±1 defined).
+    Effective mass is computed on the full valid range t = 1..T-2.
     """
     corr = np.asarray(corr)
     N, T = corr.shape
 
-    t_vals = np.arange(1, T - 1)  # 1..T-2
+    t_vals = np.arange(1, T - 1)
     nt = len(t_vals)
     m_samples = np.full((n_boot, nt), np.nan, dtype=float)
 
@@ -116,13 +121,13 @@ def bootstrap_effmass(corr, n_boot, boot_idx):
         m_samples[b, good] = np.arccosh(R[good])
 
     mean = np.full(nt, np.nan)
-    std  = np.full(nt, np.nan)
+    std = np.full(nt, np.nan)
     for i in range(nt):
         vals = m_samples[:, i]
         vals = vals[np.isfinite(vals)]
         if len(vals) >= 2:
             mean[i] = vals.mean()
-            std[i]  = vals.std(ddof=1)
+            std[i] = vals.std(ddof=1)
 
     return t_vals, mean, std
 
@@ -138,6 +143,7 @@ def _guess_m_from_effmass(cmean, t0, t1):
         m0 = 0.1
     return m0
 
+
 def _guess_Afit_from_corr(cmean, m0, t_ref):
     """
     For symmetric correlator:
@@ -150,108 +156,298 @@ def _guess_Afit_from_corr(cmean, m0, t_ref):
     A2 = abs(C) * np.exp(m0 * t_ref)
     return float(np.sqrt(max(A2, 1e-16)))
 
-def fit_PP_only(ps_samples, t0, t1, svdcut=1e-8):
-    """
-    Correlated PP fit:
-      C_PP(t) = Afit^2 * (e^{-mt} + e^{-m(T-t)})
-    Fit region is exactly t = t0..t1 inclusive.
-    """
-    N, T = ps_samples.shape
-    data = gv.dataset.avg_data({"PP": ps_samples})
-    cmean = ps_samples.mean(axis=0)
 
+def _dataset_from_samples(sample_map):
+    """
+    Build a gvar.dataset.Dataset from arrays with shape (Ncfg, T).
+
+    Each configuration is appended as one Monte Carlo sample, matching the
+    corrfitter/gvar.dataset 
+    """
+    keys = list(sample_map.keys())
+    arrays = {}
+
+    ref_shape = None
+    for k, v in sample_map.items():
+        arr = np.asarray(v, dtype=float)
+        if arr.ndim != 2:
+            raise ValueError(f"{k} must have shape (Ncfg, T), got {arr.shape}")
+        if ref_shape is None:
+            ref_shape = arr.shape
+        elif arr.shape != ref_shape:
+            raise ValueError(
+                f"All sample arrays must have the same shape; "
+                f"{k} has {arr.shape}, expected {ref_shape}"
+            )
+        arrays[k] = arr
+
+    ncfg, _ = ref_shape
+    dset = ds.Dataset()
+    for icfg in range(ncfg):
+        for k in keys:
+            dset.append(k, arrays[k][icfg])
+    return dset
+
+
+def _fit_stats(fit) -> Dict[str, Any]:
+    return {
+        "chi2": float(fit.chi2),
+        "dof": int(fit.dof),
+        "chi2_over_dof": _chi2_over_dof(float(fit.chi2), int(fit.dof)),
+        "Q": _finite_or_none(float(getattr(fit, "Q", np.nan))),
+        "logGBF": _finite_or_none(float(getattr(fit, "logGBF", np.nan))),
+    }
+
+
+def make_models_PP(T, t0, t1):
+    return [
+        cf.Corr2(
+            datatag="PP",
+            a="Afit", b="Afit", dE="m_ps",
+            tp=+T,
+            tdata=np.arange(T),
+            tfit=np.arange(t0, t1 + 1),
+        )
+    ]
+
+
+def make_models_VV(T, t0, t1):
+    return [
+        cf.Corr2(
+            datatag="VV",
+            a="AfitV", b="AfitV", dE="m_v",
+            tp=+T,
+            tdata=np.arange(T),
+            tfit=np.arange(t0, t1 + 1),
+        )
+    ]
+
+
+def make_models_PP_A0P(T, t0, t1):
+    return [
+        cf.Corr2(
+            datatag="PP",
+            a="Afit", b="Afit", dE="m_ps",
+            tp=+T,
+            tdata=np.arange(T),
+            tfit=np.arange(t0, t1 + 1),
+        ),
+        cf.Corr2(
+            datatag="A0P",
+            a="Afit", b="g", dE="m_ps",
+            tp=-T,
+            tdata=np.arange(T),
+            tfit=np.arange(t0, t1 + 1),
+        ),
+    ]
+
+
+def make_prior_PP(ps_samples, t0, t1):
+    cmean = np.mean(ps_samples, axis=0)
     m0 = _guess_m_from_effmass(cmean, t0, t1)
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
     prior["log(Afit)"] = gv.gvar([np.log(A0)], [3.0])
     prior["log(m_ps)"] = gv.gvar([np.log(m0)], [3.0])
+    return prior
 
-    model = cf.Corr2(
-        "PP",
-        a="Afit", b="Afit", dE="m_ps",
-        tp=+T,
-        tdata=np.arange(T),
-        tfit=np.arange(t0, t1 + 1),
-    )
 
-    return cf.CorrFitter(models=[model]).lsqfit(data=data, prior=prior, svdcut=svdcut)
-
-def fit_VV_only(v_samples, t0, t1, svdcut=1e-8):
-    """
-    Correlated VV fit:
-      C_VV(t) = AfitV^2 * (e^{-m_v t} + e^{-m_v(T-t)})
-    Fit region is exactly t = t0..t1 inclusive.
-    """
-    N, T = v_samples.shape
-    data = gv.dataset.avg_data({"VV": v_samples})
-    cmean = v_samples.mean(axis=0)
-
+def make_prior_VV(v_samples, t0, t1):
+    cmean = np.mean(v_samples, axis=0)
     m0 = _guess_m_from_effmass(cmean, t0, t1)
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
     prior["log(AfitV)"] = gv.gvar([np.log(A0)], [3.0])
-    prior["log(m_v)"]   = gv.gvar([np.log(m0)], [3.0])
+    prior["log(m_v)"] = gv.gvar([np.log(m0)], [3.0])
+    return prior
 
-    model = cf.Corr2(
-        "VV",
-        a="AfitV", b="AfitV", dE="m_v",
-        tp=+T,
-        tdata=np.arange(T),
-        tfit=np.arange(t0, t1 + 1),
-    )
 
-    return cf.CorrFitter(models=[model]).lsqfit(data=data, prior=prior, svdcut=svdcut)
-
-def fit_simultaneous_PP_A0P(ps_samples, a0p_samples, t0, t1, svdcut=1e-8):
-    """
-    Simultaneous correlated fit over SAME window [t0,t1] for BOTH PP and A0P.
-
-    PP:  C_PP(t)  = Afit^2 * (exp(-mt) + exp(-m(T-t)))
-    A0P: C_A0P(t) = (Afit*g) * (exp(-mt) - exp(-m(T-t)))
-    => f_PS = sqrt(2) * g / sqrt(m)
-    Fit region is exactly t = t0..t1 inclusive.
-    """
-    N, T = ps_samples.shape
-    data = gv.dataset.avg_data({"PP": ps_samples, "A0P": a0p_samples})
-    cmean = ps_samples.mean(axis=0)
-
+def make_prior_PP_A0P(ps_samples, t0, t1):
+    cmean = np.mean(ps_samples, axis=0)
     m0 = _guess_m_from_effmass(cmean, t0, t1)
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
     prior["log(Afit)"] = gv.gvar([np.log(A0)], [3.0])
     prior["log(m_ps)"] = gv.gvar([np.log(m0)], [3.0])
-    prior["g"]         = gv.gvar([0.0], [10.0])
+    prior["g"] = gv.gvar([0.0], [10.0])
+    return prior
 
-    m_pp = cf.Corr2(
-        "PP",
-        a="Afit", b="Afit", dE="m_ps",
-        tp=+T,
-        tdata=np.arange(T),
-        tfit=np.arange(t0, t1 + 1),
+
+def fit_with_bootstrap_PP(ps_samples, t0, t1, n_boot=200, svdcut=1e-8):
+    """
+    Standard + bootstrap correlated fit for PP using corrfitter
+    """
+    ps_samples = np.asarray(ps_samples, dtype=float)
+    _, T = ps_samples.shape
+
+    dset = _dataset_from_samples({"PP": ps_samples})
+    data = ds.avg_data(dset)
+
+    models = make_models_PP(T, t0, t1)
+    prior = make_prior_PP(ps_samples, t0, t1)
+    fitter = cf.CorrFitter(models=models)
+
+    fit = fitter.lsqfit(prior=prior, data=data, svdcut=svdcut)
+
+    bs_datalist = (
+        ds.avg_data(d)
+        for d in ds.bootstrap_iter(dset, n_boot)
     )
 
-    m_a0p = cf.Corr2(
-        "A0P",
-        a="Afit", b="g", dE="m_ps",
-        tp=-T,
-        tdata=np.arange(T),
-        tfit=np.arange(t0, t1 + 1),
+    bs = ds.Dataset()
+    n_success = 0
+
+    for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
+        p = bs_fit.pmean
+        bs.append("m_ps", [float(np.asarray(p["m_ps"])[0])])
+        bs.append("Afit", [float(np.asarray(p["Afit"])[0])])
+        n_success += 1
+
+    if n_success == 0:
+        raise RuntimeError("All bootstrap PP fits failed.")
+
+    bs = ds.avg_data(bs, bstrap=True)
+
+    return {
+        "fit": fit,
+        "bootstrap": bs,
+        "bootstrap_meta": {
+            "n_requested": int(n_boot),
+            "n_success": int(n_success),
+            "n_failed": int(n_boot - n_success),
+        },
+    }
+
+
+def fit_with_bootstrap_VV(v_samples, t0, t1, n_boot=200, svdcut=1e-8):
+    """
+    Standard + bootstrap correlated fit for VV using corrfitter
+    """
+    v_samples = np.asarray(v_samples, dtype=float)
+    _, T = v_samples.shape
+
+    dset = _dataset_from_samples({"VV": v_samples})
+    data = ds.avg_data(dset)
+
+    models = make_models_VV(T, t0, t1)
+    prior = make_prior_VV(v_samples, t0, t1)
+    fitter = cf.CorrFitter(models=models)
+
+    fit = fitter.lsqfit(prior=prior, data=data, svdcut=svdcut)
+
+    bs_datalist = (
+        ds.avg_data(d)
+        for d in ds.bootstrap_iter(dset, n_boot)
     )
 
-    return cf.CorrFitter(models=[m_pp, m_a0p]).lsqfit(data=data, prior=prior, svdcut=svdcut)
+    bs = ds.Dataset()
+    n_success = 0
+
+    for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
+        p = bs_fit.pmean
+        bs.append("m_v", [float(np.asarray(p["m_v"])[0])])
+        bs.append("AfitV", [float(np.asarray(p["AfitV"])[0])])
+        n_success += 1
+
+    if n_success == 0:
+        raise RuntimeError("All bootstrap VV fits failed.")
+
+    bs = ds.avg_data(bs, bstrap=True)
+
+    return {
+        "fit": fit,
+        "bootstrap": bs,
+        "bootstrap_meta": {
+            "n_requested": int(n_boot),
+            "n_success": int(n_success),
+            "n_failed": int(n_boot - n_success),
+        },
+    }
+
+
+def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, svdcut=1e-8):
+    """
+    Standard + bootstrap simultaneous correlated fit for PP + A0P using corrfitter
+    """
+    ps_samples = np.asarray(ps_samples, dtype=float)
+    a0p_samples = np.asarray(a0p_samples, dtype=float)
+
+    if ps_samples.shape != a0p_samples.shape:
+        raise ValueError(
+            f"PP and A0P samples must have the same shape, got "
+            f"{ps_samples.shape} and {a0p_samples.shape}"
+        )
+    if Ns <= 0:
+        raise RuntimeError("--Ns must be > 0 (needed for f_PS normalisation).")
+
+    _, T = ps_samples.shape
+
+    dset = _dataset_from_samples({
+        "PP": ps_samples,
+        "A0P": a0p_samples,
+    })
+    data = ds.avg_data(dset)
+
+    models = make_models_PP_A0P(T, t0, t1)
+    prior = make_prior_PP_A0P(ps_samples, t0, t1)
+    fitter = cf.CorrFitter(models=models)
+
+    fit = fitter.lsqfit(prior=prior, data=data, svdcut=svdcut)
+
+    m_ps_std = fit.p["m_ps"][0]
+    g_std = fit.p["g"][0]
+    fPS_std = -gv.sqrt(2.0) * g_std / gv.sqrt(m_ps_std) / (Ns ** 1.5)
+
+    bs_datalist = (
+        ds.avg_data(d)
+        for d in ds.bootstrap_iter(dset, n_boot)
+    )
+
+    bs = ds.Dataset()
+    n_success = 0
+
+    for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
+        p = bs_fit.pmean
+
+        m_ps_b = float(np.asarray(p["m_ps"])[0])
+        Afit_b = float(np.asarray(p["Afit"])[0])
+        g_b = float(np.asarray(p["g"])[0])
+        f_ps_b = -np.sqrt(2.0) * g_b / np.sqrt(m_ps_b) / (Ns ** 1.5)
+
+        bs.append("m_ps", [m_ps_b])
+        bs.append("Afit", [Afit_b])
+        bs.append("g", [g_b])
+        bs.append("f_ps", [f_ps_b])
+        n_success += 1
+
+    if n_success == 0:
+        raise RuntimeError("All bootstrap simultaneous PP+A0P fits failed.")
+
+    bs = ds.avg_data(bs, bstrap=True)
+
+    return {
+        "fit": fit,
+        "fPS_fit_gvar": fPS_std,
+        "bootstrap": bs,
+        "bootstrap_meta": {
+            "n_requested": int(n_boot),
+            "n_success": int(n_success),
+            "n_failed": int(n_boot - n_success),
+        },
+    }
 
 ##############################################################################
-#                                   Z_A                                     #
+#                                   Z_A                                      #
 ##############################################################################
 
 def compute_ZA(L, R):
     L = np.asarray(L)
     R = np.asarray(R)
     T = len(L)
-    tvals = np.arange(1, T - 1)  # 1..T-2
+    tvals = np.arange(1, T - 1)
     Z = np.zeros_like(tvals, float)
 
     for i, t in enumerate(tvals):
@@ -265,9 +461,10 @@ def compute_ZA(L, R):
         Z[i] = 0.5 * (term1 + term2)
     return tvals, Z
 
+
 def build_Z_samples(Lcorr, Rcorr):
     """
-    Build per-configuration Z_A(t) samples WITHOUT folding.
+    Build per-configuration Z_A(t) samples without folding.
 
     Returns:
       tvals: t = 1..T-2
@@ -278,8 +475,8 @@ def build_Z_samples(Lcorr, Rcorr):
     if Lcorr.shape != Rcorr.shape or Lcorr.ndim != 2:
         raise ValueError("build_Z_samples expects Lcorr and Rcorr with shape (Ncfg, T)")
 
-    N, T = Lcorr.shape
-    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])  # 1..T-2
+    N, _ = Lcorr.shape
+    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])
     nt = len(tvals)
 
     Z_samples = np.empty((N, nt), dtype=float)
@@ -289,15 +486,15 @@ def build_Z_samples(Lcorr, Rcorr):
 
     return tvals, Z_samples
 
+
 def fit_Z_only(Z_samples, t0, t1, svdcut=1e-8):
     """
     Correlated constant fit to Z(t) on [t0, t1].
     Z_samples: (Ncfg, nt) with nt = T-2 corresponding to t=1..T-2.
-    Fit region is exactly t = t0..t1 inclusive (in that t=1..T-2 domain).
     """
     Z_samples = np.asarray(Z_samples)
-    N, nt = Z_samples.shape
-    tvals = np.arange(1, nt + 1)  # corresponds to t=1..T-2
+    _, nt = Z_samples.shape
+    tvals = np.arange(1, nt + 1)
 
     Zg = gv.dataset.avg_data({"Z": Z_samples})["Z"]
 
@@ -315,15 +512,15 @@ def fit_Z_only(Z_samples, t0, t1, svdcut=1e-8):
 
     return lsqfit.nonlinear_fit(data=y, prior=prior, fcn=fcn, svdcut=svdcut)
 
+
 def bootstrap_ZA_curve(Lcorr, Rcorr, n_boot, boot_idx):
     """
-    Bootstrap mean/std of Z_A(t) for plotting WITHOUT folding.
+    Bootstrap mean/std of Z_A(t) for plotting without folding.
     """
     Lcorr = np.asarray(Lcorr)
     Rcorr = np.asarray(Rcorr)
-    N, T = Lcorr.shape
 
-    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])  # 1..T-2
+    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])
     nt = len(tvals)
 
     Zb = np.empty((n_boot, nt), dtype=float)
@@ -348,9 +545,11 @@ def _as_list(x):
         return list(x)
     return [x]
 
+
 def _ensure_parent_dirs(files):
     for fn in files:
         Path(fn).parent.mkdir(parents=True, exist_ok=True)
+
 
 def _savefig_multi(fig, outfiles):
     outfiles = _as_list(outfiles)
@@ -359,11 +558,12 @@ def _savefig_multi(fig, outfiles):
         fig.savefig(fn, dpi=300)
     plt.close(fig)
 
+
 def plot_plateau(t, y, e, t0, t1, fit, dfit, outfiles, label_flag, beta, mass, qlabel, ylabel):
     fig, ax = plt.subplots(figsize=(3.5, 2.5), layout="constrained")
 
     data_label = rf"$\beta={beta},\ am_0={mass}$" if label_flag == "yes" else None
-    fit_label  = rf"${qlabel} = {fit:.5f}\pm{dfit:.5f}$"
+    fit_label = rf"${qlabel} = {fit:.5f}\pm{dfit:.5f}$"
 
     ax.errorbar(t, y, yerr=e, fmt="o", color="C4", label=data_label)
     ax.axvspan(t0, t1, alpha=0.2, color="C2", label="Plateau")
@@ -384,6 +584,7 @@ def plot_plateau(t, y, e, t0, t1, fit, dfit, outfiles, label_flag, beta, mass, q
 
     _savefig_multi(fig, outfiles)
 
+
 def plot_effmass(t, m, e, t0, t1, mfit, dfit, outfiles, label, beta, mass, chan):
     qlab = f"am_{{\\rm {chan}}}"
     plot_plateau(
@@ -392,9 +593,10 @@ def plot_effmass(t, m, e, t0, t1, mfit, dfit, outfiles, label, beta, mass, chan)
         qlab, ylabel=r"$am_{\rm eff}$"
     )
 
+
 def plot_fps_two_panel(
     tps, meps, eeps,
-    ta,  mea0p, ea0p,
+    ta, mea0p, ea0p,
     t0, t1,
     mps, dmps, fPS, dfPS,
     outfiles, label_flag, beta, mass
@@ -405,7 +607,7 @@ def plot_fps_two_panel(
     )
 
     data_label = rf"$\beta={beta},\ am_0={mass}$" if label_flag == "yes" else None
-    fit_label  = (
+    fit_label = (
         rf"$am_{{\rm PS}} = {mps:.5f}\pm{dmps:.5f}$"
         + "\n" +
         rf"$af_{{\rm PS}} = {fPS:.5f}\pm{dfPS:.5f}$"
@@ -418,7 +620,7 @@ def plot_fps_two_panel(
     ax0.hlines(mps, t0, t1, color="C1", linestyle="--", label=fit_label)
     ax0.set_ylabel(r"$am_{\rm eff}^{\rm PS,PS}$")
 
-    ax1.errorbar(ta,  mea0p, yerr=ea0p, fmt="o", color="C4")
+    ax1.errorbar(ta, mea0p, yerr=ea0p, fmt="o", color="C4")
     ax1.axvspan(t0, t1, alpha=0.2, color="C2")
     ax1.fill_between([t0, t1], [mps - dmps, mps - dmps], [mps + dmps, mps + dmps],
                      color="C1", alpha=0.25)
@@ -441,12 +643,14 @@ def plot_fps_two_panel(
 _NUM_PAT_PT = re.compile(r"^pt_ll\.(\d+)\.h5$")
 _NUM_PAT_MR = re.compile(r"^mres\.(\d+)\.h5$")
 
+
 def _extract_num(path: Path, kind: str) -> int:
     name = path.name
     m = _NUM_PAT_PT.match(name) if kind == "pt" else _NUM_PAT_MR.match(name)
     if not m:
         raise RuntimeError(f"Could not parse config number from filename: {name}")
     return int(m.group(1))
+
 
 def _find_file_maps(mesons_dir: Path):
     """
@@ -471,6 +675,7 @@ def _find_file_maps(mesons_dir: Path):
         raise RuntimeError("No matching numbers between pt_ll.*.h5 and mres.*.h5")
 
     return pt_map, mr_map, common
+
 
 def _select_pairs_by_number(pt_map, mr_map, common_nums, therm, delta_traj):
     """
@@ -499,8 +704,10 @@ def _select_pairs_by_number(pt_map, mr_map, common_nums, therm, delta_traj):
 def _finite_or_none(x: float) -> float | None:
     return None if (x is None or not np.isfinite(x)) else float(x)
 
+
 def _gvar_to_obj(g: gv.GVar) -> Dict[str, float]:
     return {"mean": float(gv.mean(g)), "sdev": float(gv.sdev(g))}
+
 
 def _chi2_over_dof(chi2: float, dof: int) -> float | None:
     if dof is None or dof <= 0:
@@ -514,35 +721,33 @@ def _chi2_over_dof(chi2: float, dof: int) -> float | None:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_dir")  # in rule: .../mesons
+    parser.add_argument("input_dir")
 
     parser.add_argument("--label", default="")
     parser.add_argument("--spectrum_out", required=True)
 
-    # multiext outputs => Snakemake passes multiple filenames; accept 1 or many
-    parser.add_argument("--plot_ps",  required=True, nargs="+")
-    parser.add_argument("--plot_v",   required=True, nargs="+")
+    parser.add_argument("--plot_ps", required=True, nargs="+")
+    parser.add_argument("--plot_v", required=True, nargs="+")
     parser.add_argument("--plot_fps", required=True, nargs="+")
-    parser.add_argument("--plot_Z",   required=True, nargs="+")
+    parser.add_argument("--plot_Z", required=True, nargs="+")
 
     parser.add_argument("--plot_styles", default="")
 
     parser.add_argument("--plateau_start_ps", type=float, required=True)
-    parser.add_argument("--plateau_end_ps",   type=float, required=True)
-    parser.add_argument("--plateau_start_v",  type=float, required=True)
-    parser.add_argument("--plateau_end_v",    type=float, required=True)
+    parser.add_argument("--plateau_end_ps", type=float, required=True)
+    parser.add_argument("--plateau_start_v", type=float, required=True)
+    parser.add_argument("--plateau_end_v", type=float, required=True)
     parser.add_argument("--plateau_start_fps", type=float, required=True)
-    parser.add_argument("--plateau_end_fps",   type=float, required=True)
-    parser.add_argument("--plateau_start_Z",  type=float, required=True)
-    parser.add_argument("--plateau_end_Z",    type=float, required=True)
+    parser.add_argument("--plateau_end_fps", type=float, required=True)
+    parser.add_argument("--plateau_start_Z", type=float, required=True)
+    parser.add_argument("--plateau_end_Z", type=float, required=True)
 
     parser.add_argument("--beta", type=float, default=0)
     parser.add_argument("--mass", type=float, default=0)
     parser.add_argument("--Ns", type=int, default=0)
-    parser.add_argument("--n_boot", type=int, default=1000)
+    parser.add_argument("--n_boot", type=int, default=200)
     parser.add_argument("--svdcut", type=float, default=1e-8)
 
-    # selection by filename number
     parser.add_argument("--therm", type=int, default=0)
     parser.add_argument("--delta_traj", type=int, default=1)
 
@@ -551,14 +756,13 @@ def main():
     if args.plot_styles:
         plt.style.use(args.plot_styles)
 
-    ps0, ps1   = int(args.plateau_start_ps),   int(args.plateau_end_ps)
-    v0,  v1    = int(args.plateau_start_v),    int(args.plateau_end_v)
-    fps0, fps1 = int(args.plateau_start_fps),  int(args.plateau_end_fps)
-    z0,  z1    = int(args.plateau_start_Z),    int(args.plateau_end_Z)
+    ps0, ps1 = int(args.plateau_start_ps), int(args.plateau_end_ps)
+    v0, v1 = int(args.plateau_start_v), int(args.plateau_end_v)
+    fps0, fps1 = int(args.plateau_start_fps), int(args.plateau_end_fps)
+    z0, z1 = int(args.plateau_start_Z), int(args.plateau_end_Z)
 
     mesons_dir = Path(args.input_dir)
 
-    # Prepare JSON shell early (so failures still produce JSON)
     result: Dict[str, Any] = {
         "ok": False,
         "input": {
@@ -574,10 +778,10 @@ def main():
             "plot_styles": args.plot_styles,
         },
         "windows": {
-            "ps":  {"t0": int(ps0),  "t1": int(ps1)},
-            "v":   {"t0": int(v0),   "t1": int(v1)},
+            "ps": {"t0": int(ps0), "t1": int(ps1)},
+            "v": {"t0": int(v0), "t1": int(v1)},
             "fps": {"t0": int(fps0), "t1": int(fps1)},
-            "Z":   {"t0": int(z0),   "t1": int(z1)},
+            "Z": {"t0": int(z0), "t1": int(z1)},
         },
         "outputs": {
             "spectrum_out": str(args.spectrum_out),
@@ -594,7 +798,6 @@ def main():
             pt_map, mr_map, common_nums, therm=args.therm, delta_traj=args.delta_traj
         )
 
-        # Human log -> stderr (stdout stays JSON)
         print(
             f"[select] Using {len(nums_used)} configurations by file number "
             f"(therm={args.therm}, delta_traj={args.delta_traj}). "
@@ -620,21 +823,21 @@ def main():
             vx = read_vx_corr(str(fpt))
             vy = read_vy_corr(str(fpt))
             vz = read_vz_corr(str(fpt))
-            v.append((vx + vy + vz) / 3)
+            v.append((vx + vy + vz) / 3.0)
 
             A0_33 = read_L_corr(str(fpt))
-            A0_9  = read_L2_corr(str(fpt))
+            A0_9 = read_L2_corr(str(fpt))
             A0_comb = 0.5 * (A0_33 + A0_9)
 
             a0p.append(A0_comb)
             Ls.append(A0_comb)
             Rs.append(read_R_corr(str(fmr)))
 
-        ps  = np.array(ps)
-        v   = np.array(v)
-        a0p = np.array(a0p)
-        Ls  = np.array(Ls)
-        Rs  = np.array(Rs)
+        ps = np.array(ps, dtype=float)
+        v = np.array(v, dtype=float)
+        a0p = np.array(a0p, dtype=float)
+        Ls = np.array(Ls, dtype=float)
+        Rs = np.array(Rs, dtype=float)
 
         N, T = ps.shape
         result["data_shape"] = {"Ncfg": int(N), "T": int(T)}
@@ -642,49 +845,31 @@ def main():
         rng = np.random.default_rng()
         boot_idx = rng.integers(0, N, size=(args.n_boot, N))
 
-        # Effective masses for plots (we do not dump full arrays by default)
-        tps, meps, eeps  = bootstrap_effmass(ps,  args.n_boot, boot_idx)
-        tv,  mev,  eev   = bootstrap_effmass(v,   args.n_boot, boot_idx)
-        ta,  mea0p, ea0p = bootstrap_effmass(a0p, args.n_boot, boot_idx)
+        tps, meps, eeps = bootstrap_effmass(ps, args.n_boot, boot_idx)
+        tv, mev, eev = bootstrap_effmass(v, args.n_boot, boot_idx)
+        ta, mea0p, ea0p = bootstrap_effmass(a0p, args.n_boot, boot_idx)
 
-        # Fits
-        fit_pp  = fit_PP_only(ps, ps0, ps1, svdcut=args.svdcut)
-        fit_vv  = fit_VV_only(v,  v0,  v1,  svdcut=args.svdcut)
-        fit_sim = fit_simultaneous_PP_A0P(ps, a0p, fps0, fps1, svdcut=args.svdcut)
+        pp_res = fit_with_bootstrap_PP(ps, ps0, ps1, n_boot=args.n_boot, svdcut=args.svdcut)
+        vv_res = fit_with_bootstrap_VV(v, v0, v1, n_boot=args.n_boot, svdcut=args.svdcut)
+        sim_res = fit_with_bootstrap_PP_A0P(
+            ps, a0p, fps0, fps1, Ns=args.Ns, n_boot=args.n_boot, svdcut=args.svdcut
+        )
 
-        # Masses for plot labels (PP-only for PS plot; SIM for fPS plot)
+        fit_pp = pp_res["fit"]
+        fit_vv = vv_res["fit"]
+        fit_sim = sim_res["fit"]
+
         mps_pp_gv = fit_pp.p["m_ps"][0]
-        mps_sim_gv = fit_sim.p["m_ps"][0]
         mv_gv = fit_vv.p["m_v"][0]
+        mps_sim_gv = fit_sim.p["m_ps"][0]
+        fPS_std_gv = sim_res["fPS_fit_gvar"]
 
-        # f_PS
-        g_gv = fit_sim.p["g"][0]
-        fPS_gv = gv.sqrt(2.0) * g_gv / gv.sqrt(mps_sim_gv)
-
-        fPS_mean = float(gv.mean(fPS_gv))
-        fPS_sdev = float(gv.sdev(fPS_gv))
-
-        if args.Ns <= 0:
-            raise RuntimeError("--Ns must be > 0 (needed for f_PS normalisation).")
-
-        # Keep original normalisation/sign
-        fPS_mean = -fPS_mean / (args.Ns ** 1.5)
-        fPS_sdev =  fPS_sdev / (args.Ns ** 1.5)
-
-        # chi2/dof
-        chi2ps  = _chi2_over_dof(float(fit_pp.chi2),  int(fit_pp.dof))
-        chi2v   = _chi2_over_dof(float(fit_vv.chi2),  int(fit_vv.dof))
-        chi2fps = _chi2_over_dof(float(fit_sim.chi2), int(fit_sim.dof))
-
-        # Z_A
         _, Z_samples = build_Z_samples(Ls, Rs)
         tZ_plot, Zt_plot, Zerr_plot = bootstrap_ZA_curve(Ls, Rs, args.n_boot, boot_idx)
 
         fit_Z = fit_Z_only(Z_samples, z0, z1, svdcut=args.svdcut)
-        chi2Z = _chi2_over_dof(float(fit_Z.chi2), int(fit_Z.dof))
         Zplat_gv = fit_Z.p["Z0"]
 
-        # Plots
         plot_effmass(
             tps, meps, eeps, ps0, ps1,
             float(gv.mean(mps_pp_gv)), float(gv.sdev(mps_pp_gv)),
@@ -692,21 +877,20 @@ def main():
         )
 
         plot_effmass(
-            tv,  mev,  eev,  v0,  v1,
+            tv, mev, eev, v0, v1,
             float(gv.mean(mv_gv)), float(gv.sdev(mv_gv)),
             args.plot_v, args.label, args.beta, args.mass, "V"
         )
 
         plot_fps_two_panel(
             tps, meps, eeps,
-            ta,  mea0p, ea0p,
+            ta, mea0p, ea0p,
             fps0, fps1,
             float(gv.mean(mps_sim_gv)), float(gv.sdev(mps_sim_gv)),
-            fPS_mean, fPS_sdev,
+            float(gv.mean(fPS_std_gv)), float(gv.sdev(fPS_std_gv)),
             args.plot_fps, args.label, args.beta, args.mass
         )
 
-        # Force x-range to t <= T/2 - 2 (same as your original code)
         tmax = T // 2 - 2
         mask = tZ_plot <= tmax
 
@@ -716,42 +900,76 @@ def main():
             args.plot_Z, args.label, args.beta, args.mass, "Z_A", r"$Z_A$"
         )
 
-        # Fill JSON results
         result["results"] = {
-            "am_ps": _gvar_to_obj(mps_sim_gv),
-            "am_v":  _gvar_to_obj(mv_gv),
-            "af_ps": {"mean": float(fPS_mean), "sdev": float(fPS_sdev)},
-            "Z_A":   _gvar_to_obj(Zplat_gv),
-            "chi2_over_dof": {
-                "ps": chi2ps,
-                "v": chi2v,
-                "fps": chi2fps,
-                "Z": chi2Z,
+            "standard_fit": {
+                "PP": {
+                    "am_ps": _gvar_to_obj(pp_res["fit"].p["m_ps"][0]),
+                    "Afit": _gvar_to_obj(pp_res["fit"].p["Afit"][0]),
+                    "fit_stats": _fit_stats(pp_res["fit"]),
+                },
+                "VV": {
+                    "am_v": _gvar_to_obj(vv_res["fit"].p["m_v"][0]),
+                    "AfitV": _gvar_to_obj(vv_res["fit"].p["AfitV"][0]),
+                    "fit_stats": _fit_stats(vv_res["fit"]),
+                },
+                "simultaneous_PP_A0P": {
+                    "am_ps": _gvar_to_obj(sim_res["fit"].p["m_ps"][0]),
+                    "Afit": _gvar_to_obj(sim_res["fit"].p["Afit"][0]),
+                    "g": _gvar_to_obj(sim_res["fit"].p["g"][0]),
+                    "af_ps": _gvar_to_obj(sim_res["fPS_fit_gvar"]),
+                    "fit_stats": _fit_stats(sim_res["fit"]),
+                },
+                "Z_A": {
+                    "Z_A": _gvar_to_obj(Zplat_gv),
+                    "fit_stats": _fit_stats(fit_Z),
+                },
+            },
+            "bootstrap_fit": {
+                "PP": {
+                    "am_ps": _gvar_to_obj(pp_res["bootstrap"]["m_ps"][0]),
+                    "Afit": _gvar_to_obj(pp_res["bootstrap"]["Afit"][0]),
+                    "meta": pp_res["bootstrap_meta"],
+                },
+                "VV": {
+                    "am_v": _gvar_to_obj(vv_res["bootstrap"]["m_v"][0]),
+                    "AfitV": _gvar_to_obj(vv_res["bootstrap"]["AfitV"][0]),
+                    "meta": vv_res["bootstrap_meta"],
+                },
+                "simultaneous_PP_A0P": {
+                    "am_ps": _gvar_to_obj(sim_res["bootstrap"]["m_ps"][0]),
+                    "Afit": _gvar_to_obj(sim_res["bootstrap"]["Afit"][0]),
+                    "g": _gvar_to_obj(sim_res["bootstrap"]["g"][0]),
+                    "af_ps": _gvar_to_obj(sim_res["bootstrap"]["f_ps"][0]),
+                    "meta": sim_res["bootstrap_meta"],
+                },
+            },
+            "summary": {
+                "am_ps": _gvar_to_obj(mps_sim_gv),
+                "am_v": _gvar_to_obj(mv_gv),
+                "af_ps": _gvar_to_obj(fPS_std_gv),
+                "Z_A": _gvar_to_obj(Zplat_gv),
             },
         }
 
         result["ok"] = True
 
     except Exception as e:
-        # Store error as JSON
         result["ok"] = False
         result["error"] = {
             "type": type(e).__name__,
             "message": str(e),
         }
 
-    # Write JSON output file (single source of truth)
     out_path = Path(args.spectrum_out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, sort_keys=True)
 
-    # Print JSON to stdout (and keep human logs on stderr)
     print(json.dumps(result, indent=2, sort_keys=True))
 
-    # Exit nonzero if failed (Snakemake-friendly)
     if not result.get("ok", False):
         raise SystemExit(2)
+
 
 if __name__ == "__main__":
     main()
