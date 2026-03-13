@@ -389,7 +389,7 @@ def plot_scan_beta_time(entries_t, outname):
                             beta_labeled[beta] = True
 
         ax.set_xlabel(r"$t/a$")
-        ax.set_ylim(0.01, 0.17)
+        ax.set_ylim(0.0, 0.17)
 
         if show_legend:
             ax.legend(fontsize=7, loc="upper left")
