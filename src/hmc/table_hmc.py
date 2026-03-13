@@ -1,216 +1,377 @@
 #!/usr/bin/env python3
 """
-Build one or more LaTeX longtables summarizing HMC results from multiple log_hmc_extract.txt files.
+Build one or more LaTeX longtables summarizing HMC results.
 
-Now formatted to match the requested red longtable style with caption, label, and double lines.
+Features:
+- HMC quantities are read from the files passed on the command line.
+- beta and mass are read from keys_from_path in each HMC JSON.
+- Missing beta/mass are printed as "-".
+- Output is a longtable with multipage headers.
+- Metadata rows are filtered using --use, i.e. column use_in_<use>.
+- The last table row does not end with '\\'.
 """
 
 import argparse
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-import os
 
 
-def read_extract_file(path):
-    """Read a single log_hmc_extract.txt into a dict."""
-    with open(path) as f:
-        header = f.readline().split()
-        values = f.readline().split()
-    d = {}
-    for h, v in zip(header, values):
-        if h == "name":
-            d[h] = v
-        else:
-            try:
-                d[h] = float(v)
-            except ValueError:
-                d[h] = np.nan
-    return d
+# ---------------------------------------------------------------------
+# JSON helpers
+# ---------------------------------------------------------------------
+
+def read_json(path):
+    with open(path, "r") as f:
+        return json.load(f)
 
 
-def format_phys_err(value, error, ndigits_value=3):
-    """Format as value(error) where error is printed as a float, e.g. 7.8(9.8)."""
-    if not np.isfinite(value) or not np.isfinite(error):
-        return "—"
+def safe_get(dct, *keys, default=np.nan):
+    cur = dct
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
 
+
+def to_float(x, default=np.nan):
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def first_finite(*vals):
+    for v in vals:
+        v = to_float(v)
+        if np.isfinite(v):
+            return v
+    return np.nan
+
+
+def latex_escape(x):
+    if x is None:
+        return "-"
+    s = str(x).strip()
+    if s == "" or s.lower() == "nan":
+        return "-"
+    return s.replace("_", r"\_")
+
+
+# ---------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------
+
+def format_phys_err(value, error, force_decimals=None):
+    value = float(value)
     error = abs(float(error))
 
+    if not np.isfinite(value) or not np.isfinite(error):
+        return "—"
     if error == 0:
-        return f"{value:.{ndigits_value}g}"
+        return f"{value:g}"
 
-    # Choose how many decimals to show based on the *error* scale (like your current code)
-    exp = int(np.floor(np.log10(error)))  # error ~ 10^exp
-    digits = max(0, -exp + 1)             # keep ~2 significant digits in error
+    exp = int(np.floor(np.log10(error)))
+    norm = error / 10**exp
+    sig = 2 if norm < 3 else 1
+    decimals = max(0, -exp + sig - 1)
 
-    # Print both with the same number of decimals
-    value_str = f"{value:.{digits}f}"
-    err_str = f"{error:.{digits}f}"
+    if force_decimals is not None:
+        decimals = force_decimals
 
-    # Trim trailing zeros in the error (keeps "9.8", turns "9.80"->"9.8")
-    err_str = err_str.rstrip("0").rstrip(".") if "." in err_str else err_str
+    value_r = round(value, decimals)
+    error_r = round(error, decimals)
 
-    return f"{value_str}({err_str})"
+    value_str = f"{value_r:.{decimals}f}"
+
+    if error_r < 1:
+        err_digits = int(round(error_r * 10**decimals))
+        return f"{value_str}({err_digits})"
+    else:
+        err_str = f"{error_r:.{decimals}f}"
+        return f"{value_str}({err_str})"
 
 
-def build_table(df, output_file):
-    """Generate and save a single LaTeX longtable with the requested multi-page styling."""
+def format_intish(x):
+    x = to_float(x)
+    if np.isfinite(x):
+        return str(int(round(x)))
+    return "—"
 
-    # -------- HEADER LINE (used in firsthead and head) --------
+
+def format_floatish(x, fmt=".3g"):
+    x = to_float(x)
+    if np.isfinite(x):
+        return format(x, fmt)
+    return "—"
+
+
+def format_stringish(x):
+    if x is None:
+        return "-"
+    s = str(x).strip()
+    if s == "" or s.lower() == "nan":
+        return "-"
+    return latex_escape(s)
+
+
+# ---------------------------------------------------------------------
+# Reading HMC data
+# ---------------------------------------------------------------------
+
+def read_hmc_file(path):
+    """
+    Read one HMC JSON file.
+    beta and mass are read from keys_from_path.
+    Missing beta/mass are allowed and later formatted as '-'.
+    """
+    data = read_json(path)
+
+    rec = {
+        "name": str(safe_get(data, "ensemble", "name", default="")).strip(),
+
+        "beta": safe_get(data, "keys_from_path", "beta", default=np.nan),
+        "mass": safe_get(data, "keys_from_path", "mass", default=np.nan),
+
+        "therm": to_float(safe_get(data, "ensemble", "therm")),
+        "delta_traj": to_float(safe_get(data, "ensemble", "delta_traj")),
+
+        "length_traj": to_float(safe_get(data, "hmc_extract", "length_traj")),
+        "n_steps": to_float(safe_get(data, "hmc_extract", "n_steps")),
+        "n_conf": to_float(safe_get(data, "hmc_extract", "n_conf")),
+
+        "fullbcs": to_float(safe_get(data, "hmc_extract", "fullbcs")),
+        "fullbcs_err": to_float(safe_get(data, "hmc_extract", "fullbcs_err")),
+
+        "t_traj": to_float(safe_get(data, "hmc_extract", "t_traj")),
+        "t_traj_err": to_float(safe_get(data, "hmc_extract", "t_traj_err")),
+
+        "accept_ratio": to_float(safe_get(data, "hmc_extract", "accept_ratio")),
+
+        "plaq": to_float(safe_get(data, "hmc_extract", "plaq")),
+        "plaq_err": to_float(safe_get(data, "hmc_extract", "plaq_err")),
+
+        "tau_int_plaq": to_float(safe_get(data, "hmc_extract", "tau_int_plaq")),
+        "tau_int_plaq_err": to_float(safe_get(data, "hmc_extract", "tau_int_plaq_err")),
+
+        "source_hmc_file": str(path),
+    }
+
+    return rec
+
+
+# ---------------------------------------------------------------------
+# Metadata grouping / ordering
+# ---------------------------------------------------------------------
+
+def split_metadata_by_blank_rows(meta):
+    groups = []
+    current = []
+
+    for _, row in meta.iterrows():
+        if row.isna().all():
+            if current:
+                groups.append(pd.DataFrame(current))
+                current = []
+        else:
+            current.append(row)
+
+    if current:
+        groups.append(pd.DataFrame(current))
+
+    return groups
+
+
+def normalize_flag_series(series):
+    """
+    Robust conversion of a metadata flag column to booleans.
+    Accepts bools, 1/0, yes/no, true/false.
+    """
+    if pd.api.types.is_bool_dtype(series):
+        return series.astype("boolean").fillna(False).astype(bool)
+
+    return (
+        series.astype("string")
+        .str.strip()
+        .str.lower()
+        .isin(["true", "1", "yes", "y"])
+    )
+
+
+# ---------------------------------------------------------------------
+# LaTeX writer
+# ---------------------------------------------------------------------
+
+def build_table(df, output_table):
     header_line = (
-        "Ensemble & $l_{\\mathrm{traj}}$ & $n_{\\mathrm{steps}}$ & "
-        "$n_{\\mathrm{therm}}$ & $\\delta_{\\mathrm{traj}}$ & "
+        "Ensemble & $\\beta$ & $am_0$ & "
+        "$l_{\\mathrm{traj}}$ & $n_{\\mathrm{steps}}$ & "
+        "$n_{\\mathrm{therm}}$ & $\\delta_{\\mathrm{traj}}^{\\mathrm{plaq}}$ & "
         "$n_{\\mathrm{conf}}$ & $n_{\\mathrm{CG}}$ & "
-        "$t_{\\mathrm{traj}}[\\rm s]$ & "
-        "$\\mathrm{Acceptance\\ [\\%]}$ & "
+        "$t_{\\mathrm{traj}}[\\mathrm{s}]$ & "
+        "$\\mathrm{Acc.\\ [\\%]}$ & "
+        "$\\langle P \\rangle$ & "
         "$\\tau_{\\mathrm{int}}^{\\mathrm{plaq}}$ \\\\\n"
     )
 
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    outdir = os.path.dirname(output_table)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
 
-    with open(output_file, "w") as f:
+    with open(output_table, "w") as f:
+        f.write("%%%\\begin{longtable}{|c|c|c|c|c|c|c|c|c|c|c|c|c|}\n")
 
-        # ============================================================
-        #   BEGIN LONGTABLE + CAPTION
-        # ============================================================
-        f.write("\\color{red}\n")
-        f.write("\\begin{longtable}{|c|c|c|c|c|c|c|c|c|c|}\n")
-
-        f.write(
-            "\\caption{Characterisation of the ensembles generated to study the parameter scan of "
-            "$Sp(4)$ with $N_{\\rm f} = 2$ Dirac fermions transforming in the fundamental "
-            "representation, realised with the MDWF formalism. For each ensemble, we tabulate here "
-            "the length of the trajectory and the number of molecular dynamics steps, "
-            "$l_{\\rm traj}$ and $n_{\\rm steps}$, the number of thermalisation trajectories, "
-            "$n_{\\rm therm}$, the trajectory separation and the total number of the analysed "
-            "configurations, $\\delta_{\\rm traj}$ and $n_{\\rm conf}$, the number of the conjugate "
-            "gradient (CG) applications and the time expressed in seconds for a single trajectory, "
-            "$n_{\\rm CG}$ and $t_{\\rm traj}$, the acceptance of the HMC and the integrated "
-            "autocorrelation time for the average plaquette, $\\tau_{\\rm int}^{\\rm plaq}$.}\n"
-        )
-        f.write("\\label{tab:hmc_summary} \\\\\n\n")
-
-        # ============================================================
-        #   FIRST PAGE HEADER
-        # ============================================================
         f.write("% ===================== FIRST PAGE HEADER =====================\n")
-        f.write("\\hline\\hline\n")
+
         f.write(header_line)
         f.write("\\hline\n")
         f.write("\\endfirsthead\n\n")
 
-        # ============================================================
-        #   HEADER FOR PAGE 2+
-        # ============================================================
         f.write("% ===================== HEADER FOR PAGE 2+ =====================\n")
         f.write("\\hline\n")
         f.write(header_line)
         f.write("\\hline\n")
         f.write("\\endhead\n\n")
 
-        # ============================================================
-        #   FOOTER FOR INTERMEDIATE PAGES
-        # ============================================================
         f.write("% ===================== FOOTER FOR INTERMEDIATE PAGES =====================\n")
         f.write("\\hline\n")
         f.write("\\endfoot\n\n")
 
-        # ============================================================
-        #   FINAL FOOTER
-        # ============================================================
         f.write("% ===================== FINAL FOOTER =====================\n")
         f.write("\\hline\\hline\n")
         f.write("\\endlastfoot\n\n")
 
-        # ============================================================
-        #   TABLE BODY
-        # ============================================================
-        f.write("% ===================== TABLE BODY =====================\n")
+        nrows = len(df)
 
-        for _, r in df.iterrows():
-
-            length_traj_str = f"{r['length_traj']:.3g}" if np.isfinite(r['length_traj']) else "—"
-            n_steps_str     = str(int(r['n_steps'])) if np.isfinite(r['n_steps']) else "—"
-            therm_str       = str(int(r['therm'])) if np.isfinite(r['therm']) else "—"
-            delta_str       = str(int(r['delta_traj'])) if np.isfinite(r['delta_traj']) else "—"
-            nconf_str       = str(int(r['n_conf'])) if np.isfinite(r['n_conf']) else "—"
+        for i, (_, r) in enumerate(df.iterrows()):
+            end = " \\\\\n" if i < nrows - 1 else "\n"
 
             row = (
-                f"{r['name']} & "
-                f"{length_traj_str} & "
-                f"{n_steps_str} & "
-                f"{therm_str} & "
-                f"{delta_str} & "
-                f"{nconf_str} & "
+                f"{latex_escape(r['name'])} & "
+                f"{r['beta_fmt']} & "
+                f"{r['mass_fmt']} & "
+                f"{format_floatish(r['length_traj'], '.3g')} & "
+                f"{format_intish(r['n_steps'])} & "
+                f"{format_intish(r['therm'])} & "
+                f"{format_intish(r['delta_traj'])} & "
+                f"{format_intish(r['n_conf'])} & "
                 f"{r['fullbcs_fmt']} & "
                 f"{r['t_traj_fmt']} & "
                 f"{r['accept_fmt']} & "
-                f"{r['tau_fmt']} \\\\\n"
+                f"{r['plaq_fmt']} & "
+                f"{r['tau_fmt']}"
+                f"{end}"
             )
 
             f.write(row)
 
-        f.write("\\end{longtable}\n")
+        f.write("%%%\\end{longtable}\n")
 
-    print(f"[table_hmc] wrote {output_file} with {len(df)} ensembles (multi-page red longtable)")
+    print(f"[table_hmc] wrote {output_table} with {len(df)} ensembles")
 
 
-
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Build one or more LaTeX longtables from HMC extract files.")
-    parser.add_argument("--inputs", nargs="+", required=True,
-                        help="List of log_hmc_extract.txt files.")
-    parser.add_argument("--metadata_csv", required=True,
-                        help="Path to the metadata CSV to define ensemble order and splits (blank rows).")
-    parser.add_argument("--output_file", required=True, help="Base output .tex file path.")
+    parser = argparse.ArgumentParser(
+        description="Build LaTeX longtables from HMC JSON files, including beta and mass from keys_from_path."
+    )
+    parser.add_argument(
+        "--hmc",
+        nargs="+",
+        required=True,
+        help="List of HMC JSON files, e.g. .../hmc/log_hmc_extract.json",
+    )
+    parser.add_argument(
+        "--metadata_csv",
+        required=True,
+        help="Metadata CSV used to define ordering and blank-row splits.",
+    )
+    parser.add_argument(
+        "--output_table",
+        required=True,
+        help="Base output .tex path.",
+    )
+    parser.add_argument(
+        "--use",
+        required=True,
+        help="Selection name; metadata rows are filtered using column use_in_<use>.",
+    )
     args = parser.parse_args()
 
-    # Read metadata
     meta = pd.read_csv(args.metadata_csv, sep=r"\t|,", engine="python")
 
-    # Split metadata into groups by blank rows
-    blank_mask = meta.isnull().all(axis=1)
-    groups, current = [], []
-    for _, row in meta.iterrows():
-        if all(pd.isna(row)):
-            if current:
-                groups.append(pd.DataFrame(current))
-                current = []
-        else:
-            current.append(row)
-    if current:
-        groups.append(pd.DataFrame(current))
+    flagcol = f"use_in_{args.use}"
+    if flagcol not in meta.columns:
+        raise ValueError(f"Column '{flagcol}' not found in {args.metadata_csv}")
 
-    print(f"[table_hmc] Found {len(groups)} group(s) of ensembles separated by blank rows")
+    mask = normalize_flag_series(meta[flagcol])
+    meta_sel = meta[mask].copy()
 
-    # Read all input files
-    records = [read_extract_file(f) for f in args.inputs]
+    if meta_sel.empty:
+        raise ValueError(f"No rows selected by column '{flagcol}'")
+
+    if "name" not in meta_sel.columns:
+        raise ValueError("metadata_csv must contain a 'name' column")
+
+    meta_sel["name"] = meta_sel["name"].astype(str).str.strip()
+
+    groups = split_metadata_by_blank_rows(meta_sel)
+    print(f"[table_hmc] Found {len(groups)} metadata group(s) for {flagcol}")
+
+    records = [read_hmc_file(path) for path in args.hmc]
     df_all = pd.DataFrame(records)
 
-    # Process each group separately
+    if df_all.empty:
+        raise RuntimeError("No HMC records were loaded.")
+
+    df_all["name"] = df_all["name"].astype(str).str.strip()
+
+    df_all["beta_fmt"] = df_all["beta"].apply(format_stringish)
+    df_all["mass_fmt"] = df_all["mass"].apply(format_stringish)
+
+    df_all["fullbcs_fmt"] = df_all.apply(
+        lambda x: "-" if to_float(x["fullbcs"]) == 0 else format_phys_err(x["fullbcs"], x["fullbcs_err"]),
+        axis=1
+    )
+    df_all["t_traj_fmt"] = df_all.apply(
+        lambda x: format_phys_err(x["t_traj"], x["t_traj_err"]), axis=1
+    )
+    df_all["plaq_fmt"] = df_all.apply(
+        lambda x: format_phys_err(x["plaq"], x["plaq_err"]), axis=1
+    )
+    df_all["tau_fmt"] = df_all.apply(
+        lambda x: format_phys_err(x["tau_int_plaq"], x["tau_int_plaq_err"]), axis=1
+    )
+    df_all["accept_fmt"] = df_all["accept_ratio"].apply(
+        lambda x: f"{int(round(100 * x))}" if np.isfinite(to_float(x)) else "—"
+    )
+
     for i, group in enumerate(groups, start=1):
-        order = group["name"].dropna().tolist()
+        order = pd.unique(group["name"].dropna().astype(str).str.strip()).tolist()
         df = df_all[df_all["name"].isin(order)].copy()
 
         if df.empty:
-            print(f"[table_hmc] ⚠️ No data found for group {i}")
+            print(f"[table_hmc] warning: no data found for group {i}")
             continue
 
-        # Reorder
+        df = df.drop_duplicates(subset="name", keep="first")
+
         df["name"] = pd.Categorical(df["name"], categories=order, ordered=True)
         df = df.sort_values("name").reset_index(drop=True)
 
-        # Formatting
-        df["fullbcs_fmt"] = df.apply(lambda x: format_phys_err(x["fullbcs"], x["fullbcs_err"]), axis=1)
-        df["t_traj_fmt"]  = df.apply(lambda x: format_phys_err(x["t_traj"], x["t_traj_err"]), axis=1)
-        df["tau_fmt"]     = df.apply(lambda x: format_phys_err(x["tau_int_plaq"], x["tau_int_plaq_err"]), axis=1)
-        df["accept_fmt"]  = df["accept_ratio"].apply(lambda x: f"{int(round(x * 100))}" if np.isfinite(x) else "—")
-
-        # Output file name
         if len(groups) == 1:
-            output_path = args.output_file
+            output_path = args.output_table
         else:
-            base, ext = os.path.splitext(args.output_file)
+            base, ext = os.path.splitext(args.output_table)
             output_path = f"{base}_{i}{ext}"
 
         build_table(df, output_path)
