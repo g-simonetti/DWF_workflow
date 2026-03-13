@@ -311,10 +311,26 @@ for i, m in enumerate(s_masses):
                           ls="-", color=m_cmap[i], alpha=0.7, label=rf"$am_0={m}$")
 
 sax_rbot.set_xlabel(r"$\beta$")
-sax_rbot.set_ylabel(r"$am_{\rm res}$")
-sax_rbot.set_ylim(0.0, 0.15)
-sax_rbot.grid(axis="y", linestyle="--", alpha=0.4)
-sax_rbot.set_yticks([0, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12, 0.14])
+sax_rbot.set_ylabel(r"$am_{\rm res}^{\rm fit}$")
+sax_rbot.set_ylim(0.0, 0.14)
+sax_rbot.set_yticks([0, 0.04, 0.08, 0.12])
+
+
+
+# horizontal reference line
+sax_rbot.grid(False)
+sax_rbot.axhline(0.02, color="gray", linestyle="--", alpha=0.7)
+
+# label for the line
+sax_rbot.text(
+    0.24, 0.025,
+    r"$am_{\rm res}^{\rm fit} = 0.02$",
+    fontsize="x-small",
+    color="dimgrey",
+    ha="right",
+    va="bottom",
+    transform=sax_rbot.get_yaxis_transform()
+)
 
 if show_legend:
     sax_rtop.legend(fontsize="x-small", loc="upper left", ncol=2)
