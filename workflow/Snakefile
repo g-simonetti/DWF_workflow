@@ -39,6 +39,85 @@ def resolve_flag(wc, flag=None):
         return flag
 
 
+
+def load_and_expand(wc, pattern, flag=None):
+    df = ENSEMBLES_DF
+
+    flagcol = resolve_flag(wc, flag)
+    if flagcol not in df.columns:
+        raise ValueError(f"Column '{flagcol}' not found in metadata/ensembles.csv")
+
+    df_sel = df[df[flagcol] == True]
+
+    out = []
+    use_subdir = "{subdir}" in pattern
+
+    for _, row in df_sel.iterrows():
+        NF = int(row["NF"])
+        Nt = int(row["Nt"])
+        Ns = int(row["Ns"])
+        beta = row["beta"]
+
+        # Case 1: pattern uses {subdir}
+        if use_subdir:
+            if NF == 0:
+                subdir = f"B{beta}"
+            else:
+                subdir = (
+                    f"Ls{int(row['Ls'])}/"
+                    f"B{beta}/"
+                    f"M{row['mass']}/"
+                    f"mpv{row['mpv']}/"
+                    f"alpha{row['alpha']}/"
+                    f"a5{row['a5']}/"
+                    f"M5{row['M5']}"
+                )
+
+            out.extend(
+                expand(
+                    pattern,
+                    NF=NF,
+                    Nt=Nt,
+                    Ns=Ns,
+                    subdir=subdir,
+                )
+            )
+
+        # Case 2: explicit-pattern behavior
+        else:
+            if NF == 0:
+                out.extend(
+                    expand(
+                        pattern,
+                        NF=0,
+                        Nt=Nt,
+                        Ns=Ns,
+                        beta=beta,
+                    )
+                )
+            else:
+                out.extend(
+                    expand(
+                        pattern,
+                        NF=NF,
+                        Nt=Nt,
+                        Ns=Ns,
+                        Ls=int(row["Ls"]),
+                        beta=beta,
+                        mass=row["mass"],
+                        mpv=row["mpv"],
+                        alpha=row["alpha"],
+                        a5=row["a5"],
+                        M5=row["M5"],
+                    )
+                )
+
+    return out
+
+
+
+
+'''
 def load_and_expand(wc, pattern, flag=None):
     df = ENSEMBLES_DF
 
@@ -80,7 +159,7 @@ def load_and_expand(wc, pattern, flag=None):
                 )
             )
     return out
-
+'''
 
 def find_query(wc):
     # YM ensembles (no NF, Ls, etc.)
@@ -127,13 +206,15 @@ def metadata_lookup(variable_name):
 # -------------------------------------------------#
 # Residual mass rules
 # -------------------------------------------------#
-# 1) Extract the residual mass
+# 1) Extracts the residual mass series and
+#    a correlated fitted value
 # 2) Plots the residual mass as a function of 
-#    the unphysical parameters
+#    the unphysical parameters. Using scan_beta
+#    it residual the residual mass series 
+#    as a function of t/a for two volumes and
+#    different betas and masses
 # 3) Plots the residual mass as a function of Ls 
-#    and time elapsed per trajectory  
-# 4) Plots residual mass as a function of t/a
-#    for different betas and bare masses                                          
+#    and time elapsed per trajectory                                            
 # -------------------------------------------------#
 
 
@@ -162,7 +243,7 @@ rule m_res:
         "envs/analysis.yml"
     shell:
         (
-            "python src/residual_mass/residual_mass_plateau.py {input} "
+            "python src/residual_mass/residual_mass_fit.py {input} "
             "--label {config[label]} "
             "--mres_out {output.mres_out} "
             "--plot_file {output.plot} "
@@ -171,6 +252,9 @@ rule m_res:
             "--plateau_end {params.plateau_end} "
             "--therm {params.therm} "
             "--delta_traj_ps {params.delta_traj_ps} "
+            "--Nt {wildcards.Nt} "
+	    "--Ns {wildcards.Ns} "
+            "--Ls {wildcards.Ls} "
             "--beta {wildcards.beta} "
             "--mass {wildcards.mass} "
             "--alpha {wildcards.alpha} "
@@ -340,7 +424,6 @@ rule bulk_phase:
 #    data are also shown                              
 # -------------------------------------------------#
 
-
 rule spectrum:
     input:
         "raw_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
@@ -351,7 +434,7 @@ rule spectrum:
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
             "spectrum/spectrum.json",
-
+            
         plot_ps = multiext(
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
@@ -389,7 +472,7 @@ rule spectrum:
         plateau_start_Z   = metadata_lookup("Z_p_start"),
         plateau_end_Z     = metadata_lookup("Z_p_end"),
         therm    = metadata_lookup("therm"),
-        delta_traj        = metadata_lookup("delta_traj_w0"),
+        delta_traj        = metadata_lookup("delta_traj_ps"),
     conda:
         "envs/analysis.yml"
     shell:
@@ -465,13 +548,12 @@ rule wflow:
             "--delta_traj_q {params.delta_traj_q}"
         )
 
-
-
 # -------------------------------------------------#
 # Table rules
 # -------------------------------------------------#
 # 1) Spectrum table                              
 # 2) Ensemble table (with mres)
+# 3) Ensemble table log files
 # -------------------------------------------------#
 
 rule table_spectrum:
@@ -481,11 +563,13 @@ rule table_spectrum:
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/spectrum/spectrum.json",
             flag="use_in_spectrum"
         ),
-        wflow = lambda wc: load_and_expand(
-            wc, 
-            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow_extract.json",
-            flag="use_in_spectrum"
-        ),
+	
+        #wflow = lambda wc: load_and_expand(
+        #    wc, 
+        #    "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow_extract.json",
+        #    flag="use_in_spectrum"
+        #),
+	
         metadata = "metadata/ensembles.csv"
     output:
         table = "assets/tables/table_spectrum.tex"
@@ -497,8 +581,47 @@ rule table_spectrum:
         "--wflow {input.wflow} "
         "--metadata_csv {input.metadata} "
         "--output_file {output.table}"
+        
 
 
+rule table_mres_ensemble:
+    input:
+        mres=lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "residual_mass/m_res.json",
+        ),
+        metadata="metadata/ensembles.csv"
+    output:
+        table="assets/tables/mres/table_ensemble_mres_{use}.tex"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/residual_mass/table_ensembles_parameters_mres_corrfit.py "
+        "--mres {input.mres} "
+        "--metadata_csv {input.metadata} "
+        "--output_table {output.table} "
+        "--use {wildcards.use}"
+
+
+rule table_hmc_ensemble:
+    input:
+        hmc=lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/{subdir}/hmc/log_hmc_extract.json",
+        ),
+        metadata="metadata/ensembles.csv"
+    output:
+        table="assets/tables/hmc/table_ensemble_hmc_{use}.tex"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/hmc/table_hmc.py "
+        "--hmc {input.hmc} "
+        "--metadata_csv {input.metadata} "
+        "--output_table {output.table} "
+        "--use {wildcards.use}"
 
 
 
