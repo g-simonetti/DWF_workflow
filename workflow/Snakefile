@@ -221,7 +221,7 @@ def metadata_lookup(variable_name):
 #    a correlated fitted value
 # 2) Plots the residual mass as a function of 
 #    the unphysical parameters. Using scan_beta
-#    it residual the residual mass series 
+#    it plots the residual mass series 
 #    as a function of t/a for two volumes and
 #    different betas and masses
 # 3) Plots the residual mass as a function of Ls 
@@ -600,13 +600,13 @@ rule make_finite_volume_plots:
 rule finite_volume:
     input:
         m_ps = lambda wc: load_and_expand(
-            wc, 
+            wc,
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
             "spectrum/spectrum.json",
             flag="use_in_finite_volume"
         ),
-
+        metadata_csv = "metadata/ensembles.csv",
     output:
         fv_out =
             "assets/plots/finite_volume/finite_volume_B{beta}M{mass}.json",
@@ -622,6 +622,8 @@ rule finite_volume:
             "python src/finite_volume/finite_volume_plot.py "
             "--label {config[label]} "
             "--m_ps {input.m_ps} "
+            "--metadata_csv {input.metadata_csv} "
+            "--use finite_volume "
             "--fv_out {output.fv_out} "
             "--fv_plot {output.fv_plot} "
             "--plot_styles {config[plot_styles]} "
@@ -709,22 +711,29 @@ rule table_hmc_ensemble:
 
 rule table_finite_volume:
     input:
-        fv = lambda wc: load_and_expand(
+        mps = lambda wc: load_and_expand(
             wc, 
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "finite_volume/finite_volume.json",
+            "spectrum/spectrum.json",
             flag="use_in_finite_volume"
         ),
-	
+        mres = lambda wc: load_and_expand(
+            wc, 
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "residual_mass/m_res.json",
+            flag="use_in_finite_volume"
+        ),	
         metadata = "metadata/ensembles.csv"
     output:
-        table = "assets/finite_volume/table_finite_volume.tex"
+        table = "assets/tables/finite_volume/table_finite_volume.tex"
     conda:
         "envs/analysis.yml"
     shell:
         "python src/finite_volume/finite_volume_table.py "
-        "--fv {input.fv} "
+        "--mps  {input.mps} "
+        "--mres {input.mres} "
         "--metadata_csv {input.metadata} "
         "--output_table {output.table}"
         
