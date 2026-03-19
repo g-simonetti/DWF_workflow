@@ -23,6 +23,13 @@ Outputs written to JSON:
   - bootstrap_fit: bootstrap summary for PP, VV, simultaneous PP+A0P
 
 Z_A remains a standard correlated plateau fit as in the original code.
+
+Bootstrap fit_stats now mirror the standard_fit structure:
+  - chi2: {mean, sdev}
+  - dof: integer
+  - chi2_over_dof: {mean, sdev}
+  - Q: null
+  - logGBF: null
 """
 
 import argparse
@@ -48,36 +55,46 @@ plt.style.use("tableau-colorblind10")
 #                              DATA READERS                                  #
 ##############################################################################
 
+
 def read_meson_corr(filename, name):
     with h5py.File(filename, "r") as f:
         data = f[f"meson/{name}/corr"][:]
         return data["re"]
 
+
 def read_ps_corr(fname):
     return read_meson_corr(fname, "meson_1")
+
 
 def read_vx_corr(fname):
     return read_meson_corr(fname, "meson_50")
 
+
 def read_vy_corr(fname):
     return read_meson_corr(fname, "meson_83")
+
 
 def read_vz_corr(fname):
     return read_meson_corr(fname, "meson_116")
 
+
 def read_L_corr(fname):
     return read_meson_corr(fname, "meson_33")  # A0,P
 
+
 def read_L2_corr(fname):
     return read_meson_corr(fname, "meson_9")   # P,A0
+
 
 def read_R_corr(fname):
     with h5py.File(fname, "r") as f:
         return f["wardIdentity/PA0"][:]["re"]
 
+
 ##############################################################################
 #                           EFFECTIVE MASS                                   #
 ##############################################################################
+
 
 def eff_mass_hyperbolic(C):
     """
@@ -131,9 +148,11 @@ def bootstrap_effmass(corr, n_boot, boot_idx):
 
     return t_vals, mean, std
 
+
 ##############################################################################
 #                      CORRFITTER FIT HELPERS                                #
 ##############################################################################
+
 
 def _guess_m_from_effmass(cmean, t0, t1):
     teff, meff = eff_mass_hyperbolic(cmean)
@@ -162,7 +181,7 @@ def _dataset_from_samples(sample_map):
     Build a gvar.dataset.Dataset from arrays with shape (Ncfg, T).
 
     Each configuration is appended as one Monte Carlo sample, matching the
-    corrfitter/gvar.dataset 
+    corrfitter/gvar.dataset workflow more closely.
     """
     keys = list(sample_map.keys())
     arrays = {}
@@ -196,6 +215,45 @@ def _fit_stats(fit) -> Dict[str, Any]:
         "chi2_over_dof": _chi2_over_dof(float(fit.chi2), int(fit.dof)),
         "Q": _finite_or_none(float(getattr(fit, "Q", np.nan))),
         "logGBF": _finite_or_none(float(getattr(fit, "logGBF", np.nan))),
+    }
+
+
+def _bootstrap_fit_stats(chi2_samples, dof: int) -> Dict[str, Any]:
+    """
+    Bootstrap analogue of _fit_stats with the same JSON structure where possible.
+
+    Since bootstrap fits produce an ensemble of chi2 values, chi2 and chi2_over_dof
+    are reported as {mean, sdev}. Q and logGBF are left as null.
+    """
+    chi2_samples = np.asarray(chi2_samples, dtype=float)
+    chi2_samples = chi2_samples[np.isfinite(chi2_samples)]
+
+    if chi2_samples.size == 0:
+        return {
+            "chi2": None,
+            "dof": int(dof),
+            "chi2_over_dof": None,
+            "Q": None,
+            "logGBF": None,
+        }
+
+    chi2_mean = float(np.mean(chi2_samples))
+    chi2_sdev = float(np.std(chi2_samples, ddof=1)) if chi2_samples.size >= 2 else 0.0
+
+    if dof is not None and dof > 0:
+        chi2_over_dof = {
+            "mean": chi2_mean / float(dof),
+            "sdev": chi2_sdev / float(dof),
+        }
+    else:
+        chi2_over_dof = None
+
+    return {
+        "chi2": {"mean": chi2_mean, "sdev": chi2_sdev},
+        "dof": int(dof),
+        "chi2_over_dof": chi2_over_dof,
+        "Q": None,
+        "logGBF": None,
     }
 
 
@@ -248,8 +306,8 @@ def make_prior_PP(ps_samples, t0, t1):
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
-    prior["log(Afit)"] = gv.gvar([np.log(A0)], [3.0])
-    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [3.0])
+    prior["log(Afit)"] = gv.gvar([np.log(A0)], [100.0])
+    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [100.0])
     return prior
 
 
@@ -259,8 +317,8 @@ def make_prior_VV(v_samples, t0, t1):
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
-    prior["log(AfitV)"] = gv.gvar([np.log(A0)], [3.0])
-    prior["log(m_v)"] = gv.gvar([np.log(m0)], [3.0])
+    prior["log(AfitV)"] = gv.gvar([np.log(A0)], [100.0])
+    prior["log(m_v)"] = gv.gvar([np.log(m0)], [100.0])
     return prior
 
 
@@ -270,15 +328,15 @@ def make_prior_PP_A0P(ps_samples, t0, t1):
     A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
 
     prior = gv.BufferDict()
-    prior["log(Afit)"] = gv.gvar([np.log(A0)], [3.0])
-    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [3.0])
-    prior["g"] = gv.gvar([0.0], [10.0])
+    prior["log(Afit)"] = gv.gvar([np.log(A0)], [100.0])
+    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [100.0])
+    prior["g"] = gv.gvar([0.0], [100.0])
     return prior
 
 
 def fit_with_bootstrap_PP(ps_samples, t0, t1, n_boot=200, svdcut=1e-8):
     """
-    Standard + bootstrap correlated fit for PP using corrfitter
+    Standard + bootstrap correlated fit for PP using corrfitter.
     """
     ps_samples = np.asarray(ps_samples, dtype=float)
     _, T = ps_samples.shape
@@ -298,12 +356,14 @@ def fit_with_bootstrap_PP(ps_samples, t0, t1, n_boot=200, svdcut=1e-8):
     )
 
     bs = ds.Dataset()
+    bs_chi2 = []
     n_success = 0
 
     for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
         p = bs_fit.pmean
         bs.append("m_ps", [float(np.asarray(p["m_ps"])[0])])
         bs.append("Afit", [float(np.asarray(p["Afit"])[0])])
+        bs_chi2.append(float(bs_fit.chi2))
         n_success += 1
 
     if n_success == 0:
@@ -314,6 +374,7 @@ def fit_with_bootstrap_PP(ps_samples, t0, t1, n_boot=200, svdcut=1e-8):
     return {
         "fit": fit,
         "bootstrap": bs,
+        "bootstrap_fit_stats": _bootstrap_fit_stats(bs_chi2, int(fit.dof)),
         "bootstrap_meta": {
             "n_requested": int(n_boot),
             "n_success": int(n_success),
@@ -324,7 +385,7 @@ def fit_with_bootstrap_PP(ps_samples, t0, t1, n_boot=200, svdcut=1e-8):
 
 def fit_with_bootstrap_VV(v_samples, t0, t1, n_boot=200, svdcut=1e-8):
     """
-    Standard + bootstrap correlated fit for VV using corrfitter
+    Standard + bootstrap correlated fit for VV using corrfitter.
     """
     v_samples = np.asarray(v_samples, dtype=float)
     _, T = v_samples.shape
@@ -344,12 +405,14 @@ def fit_with_bootstrap_VV(v_samples, t0, t1, n_boot=200, svdcut=1e-8):
     )
 
     bs = ds.Dataset()
+    bs_chi2 = []
     n_success = 0
 
     for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
         p = bs_fit.pmean
         bs.append("m_v", [float(np.asarray(p["m_v"])[0])])
         bs.append("AfitV", [float(np.asarray(p["AfitV"])[0])])
+        bs_chi2.append(float(bs_fit.chi2))
         n_success += 1
 
     if n_success == 0:
@@ -360,6 +423,7 @@ def fit_with_bootstrap_VV(v_samples, t0, t1, n_boot=200, svdcut=1e-8):
     return {
         "fit": fit,
         "bootstrap": bs,
+        "bootstrap_fit_stats": _bootstrap_fit_stats(bs_chi2, int(fit.dof)),
         "bootstrap_meta": {
             "n_requested": int(n_boot),
             "n_success": int(n_success),
@@ -370,7 +434,7 @@ def fit_with_bootstrap_VV(v_samples, t0, t1, n_boot=200, svdcut=1e-8):
 
 def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, svdcut=1e-8):
     """
-    Standard + bootstrap simultaneous correlated fit for PP + A0P using corrfitter
+    Standard + bootstrap simultaneous correlated fit for PP + A0P using corrfitter.
     """
     ps_samples = np.asarray(ps_samples, dtype=float)
     a0p_samples = np.asarray(a0p_samples, dtype=float)
@@ -407,6 +471,7 @@ def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, s
     )
 
     bs = ds.Dataset()
+    bs_chi2 = []
     n_success = 0
 
     for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
@@ -421,6 +486,7 @@ def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, s
         bs.append("Afit", [Afit_b])
         bs.append("g", [g_b])
         bs.append("f_ps", [f_ps_b])
+        bs_chi2.append(float(bs_fit.chi2))
         n_success += 1
 
     if n_success == 0:
@@ -432,6 +498,7 @@ def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, s
         "fit": fit,
         "fPS_fit_gvar": fPS_std,
         "bootstrap": bs,
+        "bootstrap_fit_stats": _bootstrap_fit_stats(bs_chi2, int(fit.dof)),
         "bootstrap_meta": {
             "n_requested": int(n_boot),
             "n_success": int(n_success),
@@ -439,9 +506,11 @@ def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, s
         },
     }
 
+
 ##############################################################################
 #                                   Z_A                                      #
 ##############################################################################
+
 
 def compute_ZA(L, R):
     L = np.asarray(L)
@@ -534,9 +603,11 @@ def bootstrap_ZA_curve(Lcorr, Rcorr, n_boot, boot_idx):
 
     return tvals, Zb.mean(axis=0), Zb.std(axis=0, ddof=1)
 
+
 ##############################################################################
 #                                  PLOTTING                                  #
 ##############################################################################
+
 
 def _as_list(x):
     if x is None:
@@ -568,8 +639,13 @@ def plot_plateau(t, y, e, t0, t1, fit, dfit, outfiles, label_flag, beta, mass, q
     ax.errorbar(t, y, yerr=e, fmt="o", color="C4", label=data_label)
     ax.axvspan(t0, t1, alpha=0.2, color="C2", label="Plateau")
 
-    ax.fill_between([t0, t1], [fit - dfit, fit - dfit], [fit + dfit, fit + dfit],
-                    color="C1", alpha=0.25)
+    ax.fill_between(
+        [t0, t1],
+        [fit - dfit, fit - dfit],
+        [fit + dfit, fit + dfit],
+        color="C1",
+        alpha=0.25,
+    )
     ax.hlines(fit, t0, t1, color="C1", linestyle="--", label=fit_label)
 
     ax.set_xlabel(r"$t/a$")
@@ -615,15 +691,25 @@ def plot_fps_two_panel(
 
     ax0.errorbar(tps, meps, yerr=eeps, fmt="o", color="C4", label=data_label)
     ax0.axvspan(t0, t1, alpha=0.2, color="C2", label="Plateau")
-    ax0.fill_between([t0, t1], [mps - dmps, mps - dmps], [mps + dmps, mps + dmps],
-                     color="C1", alpha=0.25)
+    ax0.fill_between(
+        [t0, t1],
+        [mps - dmps, mps - dmps],
+        [mps + dmps, mps + dmps],
+        color="C1",
+        alpha=0.25,
+    )
     ax0.hlines(mps, t0, t1, color="C1", linestyle="--", label=fit_label)
     ax0.set_ylabel(r"$am_{\rm eff}^{\rm PS,PS}$")
 
     ax1.errorbar(ta, mea0p, yerr=ea0p, fmt="o", color="C4")
     ax1.axvspan(t0, t1, alpha=0.2, color="C2")
-    ax1.fill_between([t0, t1], [mps - dmps, mps - dmps], [mps + dmps, mps + dmps],
-                     color="C1", alpha=0.25)
+    ax1.fill_between(
+        [t0, t1],
+        [mps - dmps, mps - dmps],
+        [mps + dmps, mps + dmps],
+        color="C1",
+        alpha=0.25,
+    )
     ax1.hlines(mps, t0, t1, color="C1", linestyle="--")
     ax1.set_xlabel(r"$t/a$")
     ax1.set_ylabel(r"$am_{\rm eff}^{\rm AV,PS}$")
@@ -635,6 +721,7 @@ def plot_fps_two_panel(
         ax0.legend()
 
     _savefig_multi(fig, outfiles)
+
 
 ##############################################################################
 #                       FILE DISCOVERY + SELECTION                           #
@@ -697,9 +784,11 @@ def _select_pairs_by_number(pt_map, mr_map, common_nums, therm, delta_traj):
     mr_sel = [mr_map[n] for n in nums_sel]
     return pt_sel, mr_sel, nums_sel
 
+
 ##############################################################################
 #                                JSON HELPERS                                #
 ##############################################################################
+
 
 def _finite_or_none(x: float) -> float | None:
     return None if (x is None or not np.isfinite(x)) else float(x)
@@ -715,9 +804,11 @@ def _chi2_over_dof(chi2: float, dof: int) -> float | None:
     val = float(chi2) / float(dof)
     return _finite_or_none(val)
 
+
 ##############################################################################
 #                                   MAIN                                     #
 ##############################################################################
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -928,11 +1019,13 @@ def main():
                 "PP": {
                     "am_ps": _gvar_to_obj(pp_res["bootstrap"]["m_ps"][0]),
                     "Afit": _gvar_to_obj(pp_res["bootstrap"]["Afit"][0]),
+                    "fit_stats": pp_res["bootstrap_fit_stats"],
                     "meta": pp_res["bootstrap_meta"],
                 },
                 "VV": {
                     "am_v": _gvar_to_obj(vv_res["bootstrap"]["m_v"][0]),
                     "AfitV": _gvar_to_obj(vv_res["bootstrap"]["AfitV"][0]),
+                    "fit_stats": vv_res["bootstrap_fit_stats"],
                     "meta": vv_res["bootstrap_meta"],
                 },
                 "simultaneous_PP_A0P": {
@@ -940,6 +1033,7 @@ def main():
                     "Afit": _gvar_to_obj(sim_res["bootstrap"]["Afit"][0]),
                     "g": _gvar_to_obj(sim_res["bootstrap"]["g"][0]),
                     "af_ps": _gvar_to_obj(sim_res["bootstrap"]["f_ps"][0]),
+                    "fit_stats": sim_res["bootstrap_fit_stats"],
                     "meta": sim_res["bootstrap_meta"],
                 },
             },
