@@ -5,3 +5,10 @@ assets/
 .snakemake/
 .DS_Store
 __pycache__/
+src/spectrum/mps_mv_plot_luigi.py
+src/spectrum/spectrum copy.py
+workflow/Snakefile copy
+src/hmc/log_ensembles_extract_old.py
+src/hmc/table_hmc copy.py
+src/spectrum/fps_mps_plot_old.py
+
