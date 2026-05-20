@@ -282,15 +282,16 @@ rule plot_mres_scan:
             wc,
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
             "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
-            "residual_mass/m_res.json"
+            "residual_mass/m_res.json",
+            flag = "use_in_scan_param",
         ),
     output:
-        "assets/plots/parameter_scan/mres_{use}.pdf"
+        "assets/plots/parameter_scan/mres_scan_param_b{beta}.pdf"
     conda:
         "envs/analysis.yml"
     shell:
         "python src/parameter_scan/plot_mres_scan.py "
-        "--use {wildcards.use} "
+        "--use scan_param "
         "--mres {input.mres} "
         "--output_filename {output} "
         "--label {config[label]} "
@@ -319,7 +320,7 @@ rule plot_cost_Ls:
     conda:
         "envs/analysis.yml"
     shell:
-        "python src/parameter_scan/plot_mres_cost_Ls.py "
+        "python src/parameter_scan/plot_mres_cost_Ls_fits.py "
         "--mres {input.mres} "
         "--hmc {input.hmc} "
         "--label {config[label]} "
@@ -432,7 +433,9 @@ rule bulk_phase:
 #    Plots the average plaquette for Shamir 
 #    action as a function of beta and the bare
 #    masses. Pure YM data and residual mass
-#    data are also shown                              
+#    data are also shown 
+# 2) Plots amv as a function of amps in units
+#    of w0                         
 # -------------------------------------------------#
 
 rule spectrum:
@@ -482,7 +485,7 @@ rule spectrum:
         plateau_end_fps   = metadata_lookup("fps_p_end"),
         plateau_start_Z   = metadata_lookup("Z_p_start"),
         plateau_end_Z     = metadata_lookup("Z_p_end"),
-        therm    = metadata_lookup("therm"),
+        therm             = metadata_lookup("therm"),
         delta_traj        = metadata_lookup("delta_traj_ps"),
     conda:
         "envs/analysis.yml"
@@ -496,6 +499,7 @@ rule spectrum:
             "--plot_fps {output.plot_fps} "
             "--plot_Z   {output.plot_Z} "
             "--plot_styles {config[plot_styles]} "
+            "--n_boot {config[bootstrap_spectrum_samples]} "
             "--plateau_start_ps {params.plateau_start_ps} "
             "--plateau_end_ps {params.plateau_end_ps} "
             "--plateau_start_v {params.plateau_start_v} "
@@ -510,6 +514,186 @@ rule spectrum:
             "--mass {wildcards.mass} "
             "--Ns {wildcards.Ns}"
         )
+
+
+
+rule plot_mps_mv:
+    input:
+        spectrum = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/spectrum.json",
+            flag="use_in_spectrum",
+        ),
+
+        wflow = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "wflow/wflow_extract.json",
+            flag="use_in_spectrum",
+        ),
+
+        spectrum_w = "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/spectrum_data.json",
+        wflow_w =    "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/ensembles.json",
+
+    output:
+        plot     = "assets/plots/spectrum/mps_mv_plot.pdf",
+        data_fit = "intermediary_data/NF2/spectrum/mv_mps_fit.json",
+    conda:
+        "envs/analysis.yml"
+    shell:
+        #"python src/spectrum/mps_mv_plot.py "
+        "python src/spectrum/mps_mv_plot_fitsdata.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--spectrum_w {input.spectrum_w} "
+        "--wflow_w {input.wflow_w} "
+        "--output_plot {output.plot} "
+        "--output_data {output.data_fit}" 
+
+
+rule plot_v_mps_bootstrap:
+    input:
+        wilsons_data = "intermediary_data/NF2/spectrum/wilson/wilson_extrapolation.json",
+
+        spectrum = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/spectrum.json",
+            flag="use_in_spectrum",
+        ),
+
+        wflow = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "wflow/wflow_extract.json",
+            flag="use_in_spectrum",
+        ),
+
+        spectrum_w = "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/spectrum_data.json",
+        wflow_w =    "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/ensembles.json",
+
+    output:
+        plot     = "assets/plots/spectrum/mps_mv_plot_bootstrap.pdf",
+        data_fit = "intermediary_data/NF2/spectrum/mv_mps_fit_bootstrap.json",
+    conda:
+        "envs/analysis.yml"
+    shell:
+        #"python src/spectrum/mps_mv_plot.py "
+        "python src/spectrum/mps_mv_plot_fitsdata_bootstrap.py "
+        #"python src/spectrum/mps_mv_plot_fitsdata_bootstrap_commonconfig.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--spectrum_w {input.spectrum_w} "
+        "--wflow_w {input.wflow_w} "
+        "--output_plot {output.plot} "
+        "--output_data {output.data_fit}" 
+
+
+
+
+
+rule plot_fps_mps:
+    input:
+        spectrum = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/spectrum.json",
+            flag="use_in_spectrum",
+        ),
+
+        wflow = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "wflow/wflow_extract.json",
+            flag="use_in_spectrum",
+        ),
+
+        spectrum_w = "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/spectrum_data.json",
+        wflow_w =    "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/ensembles.json",
+
+    output:
+        plot     = "assets/plots/spectrum/fps_mps_plot.pdf",
+        data_fit = "intermediary_data/NF2/spectrum/fps_mps_fit.json",
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/spectrum/fps_mps_plot_copy.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--spectrum_w {input.spectrum_w} "
+        "--wflow_w {input.wflow_w} "
+        "--output_plot {output.plot} "
+        "--output_data {output.data_fit}"
+
+
+
+
+rule plot_fps_mps_bootstrap:
+    input:
+        spectrum = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "spectrum/spectrum.json",
+            flag="use_in_spectrum",
+        ),
+
+        wflow = lambda wc: load_and_expand(
+            wc,
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "wflow/wflow_extract.json",
+            flag="use_in_spectrum",
+        ),
+
+        spectrum_w = "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/spectrum_data.json",
+        wflow_w =    "intermediary_data/NF2/spectrum/wilson_fermions/latest_data/ensembles.json",
+
+    output:
+        plot     = "assets/plots/spectrum/fps_mps_plot_bootstrap.pdf",
+        data_fit = "intermediary_data/NF2/spectrum/fps_mps_fit_bootstrap.json",
+    conda:
+        "envs/analysis.yml"
+    shell:
+        #"python src/spectrum/fps_mps_plot.py "
+        #"python src/spectrum/fps_mps_plot_fitsdata_bootstrap.py "
+        "python src/spectrum/fps_mps_plot_fitsdata_bootstrap_commonconfig.py "
+        "--plot_styles {config[plot_styles]} "
+        "--spectrum {input.spectrum} "
+        "--wflow {input.wflow} "
+        "--spectrum_w {input.spectrum_w} "
+        "--wflow_w {input.wflow_w} "
+        "--output_plot {output.plot} "
+        "--output_data {output.data_fit}"
+
+
+rule process_wilson:
+    input: 
+        dir = "wilson_data/",
+    output:
+        data_fit = "intermediary_data/NF2/spectrum/wilson/wilson_extrapolation.json",
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/spectrum/wilson_extrapolation.py "
+        "--plot_styles {config[plot_styles]} "
+        "--wilson-init-strategy linearized "
+        #"--wilson-init-strategy paper_tnc "
+        "--wilson-v-source extraction "
+        "--wilson-ps-source extraction "
+        "--dir {input.dir} "
+        "--output_data {output.data_fit}"
+
 
 
 # -------------------------------------------------
@@ -536,21 +720,28 @@ rule wflow:
         plot_qw0=multiext(
             "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/topcharge_w0",
             config["plot_filetype"]),
+        plot_q_cfg=multiext(
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/topcharge_cfg500",
+            config["plot_filetype"]),
     conda:
         "envs/analysis.yml"
     params:
         therm=metadata_lookup("therm"),
         delta_traj_w=metadata_lookup("delta_traj_w0"),
-        delta_traj_q=metadata_lookup("delta_traj_w0"),
+        delta_traj_q=metadata_lookup("delta_traj_q"),
+        q_cfg_id=500,
     shell:
         (
             "python src/wflow/wflow.py {input} "
             "--label {config[label]} "
             "--W0 {config[W0_reference]} "
+            "--n_boot {config[bootstrap_spectrum_samples]} "
             "--wflow_out {output.summary} "
             "--plot_wflow {output.plot_wflow} "
             "--plot_q0 {output.plot_q0} "
             "--plot_qw0 {output.plot_qw0} "
+            "--plot_q_cfg {output.plot_q_cfg} "
+            "--q_cfg_id {params.q_cfg_id} "
             "--plot_styles '{config[plot_styles]}' "
             "--beta {wildcards.beta} "
             "--mass {wildcards.mass} "
@@ -568,33 +759,6 @@ rule wflow:
 #     the tau_int script to compute the
 #     integrated autocorrelation time.   
 # -------------------------------------------------
-
-rule plot_finite_volume_original:
-    input:
-        spectrum = lambda w: ensemble_files(w.subdir, "spectrum/spectrum.txt"),
-        metadata = "metadata/{subdir}/ensembles.csv",
-        script = "src/finite-volume/finite_volume_plot.py"
-    output:
-        "assets/plots/{subdir}/finite_volume_am{am}_beta{beta}.pdf"
-    conda:
-        "envs/analysis.yml"
-    shell:
-        "python src/finite-volume/finite_volume_plot.py "
-        "--plot_styles {config[plot_styles]} "
-        "--spectrum {input.spectrum} "
-        "--metadata_csv {input.metadata} "
-        "--am {wildcards.am} "
-        "--beta {wildcards.beta} "
-        "--output_file {output}"
-
-rule make_finite_volume_plots:
-    input:
-        "assets/plots/finite-volume/finite_volume_am0.06_beta7.4.pdf",
-        "assets/plots/finite-volume/finite_volume_am0.02_beta7.4.pdf",
-        "assets/plots/finite-volume/finite_volume_am0.06_beta7.6.pdf",
-        "assets/plots/finite-volume/finite_volume_am0.02_beta7.6.pdf",
-
-
 
 
 rule finite_volume:
@@ -619,7 +783,7 @@ rule finite_volume:
         "envs/analysis.yml"
     shell:
         (
-            "python src/finite_volume/finite_volume_plot.py "
+            "python src/finite_volume/finite_volume_exp.py "
             "--label {config[label]} "
             "--m_ps {input.m_ps} "
             "--metadata_csv {input.metadata_csv} "
@@ -639,6 +803,7 @@ rule finite_volume:
 # 2) Ensemble table (with mres)
 # 3) Ensemble table log files
 # 4) Finite volume analysis table
+# 5) Fitting parameters chiral continuum extraction
 # -------------------------------------------------#
 
 rule table_spectrum:
@@ -649,11 +814,19 @@ rule table_spectrum:
             flag="use_in_spectrum"
         ),
 	
-        #wflow = lambda wc: load_and_expand(
-        #    wc, 
-        #    "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow_extract.json",
-        #    flag="use_in_spectrum"
-        #),
+        wflow = lambda wc: load_and_expand(
+            wc, 
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/wflow_extract.json",
+            flag="use_in_spectrum"
+        ),
+
+        mres = lambda wc: load_and_expand(
+            wc, 
+            "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/"
+            "B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/"
+            "residual_mass/m_res.json",
+            flag="use_in_spectrum"
+        ),
 	
         metadata = "metadata/ensembles.csv"
     output:
@@ -663,6 +836,7 @@ rule table_spectrum:
     shell:
         "python src/spectrum/spectrum_table.py "
         "--spectrum {input.spectrum} "
+        "--mres {input.mres} "
         "--wflow {input.wflow} "
         "--metadata_csv {input.metadata} "
         "--output_file {output.table}"
@@ -736,6 +910,22 @@ rule table_finite_volume:
         "--mres {input.mres} "
         "--metadata_csv {input.metadata} "
         "--output_table {output.table}"
+
+
+rule mv_mps_extrapolation_tables:
+    input:
+        fit_bootstrap = "intermediary_data/NF2/spectrum/mv_mps_fit_bootstrap.json",
+    output:
+        fit_table = "assets/tables/spectrum/mv_mps_extrapolation_table.tex",
+        wilson_points_table = "assets/tables/spectrum/mv_mps_wilson_points_table.tex",
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/spectrum/extrapoaltion_tables.py "
+        "--mv_fit {input.fit_bootstrap} "
+        "--mv_fit_bootstrap {input.fit_bootstrap} "
+        "--output_file {output.fit_table} "
+        "--output_wilson_points {output.wilson_points_table}"
         
 
 
@@ -744,7 +934,8 @@ rule table_finite_volume:
 # Copy to assets
 # -------------------------------------------------#
 # 1) Spectrum plots
-# 2) mres plots                           
+# 2) mres plots 
+# 3) Topological charge plots                          
 # -------------------------------------------------#
 
 
@@ -767,5 +958,59 @@ rule copy_spectrum_to_assets:
         cp "{input.V_fit}" "{output.V_fit_cp}"
         """
 
+rule copy_mres_to_assets:
+    input:
+        mres="intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/residual_mass/mres_t.pdf",
 
+    output:
+        mres_cp=(
+            "assets/plots/bulk_phase/"
+            "mres_NF{NF}_B{beta}M{mass}_Nt{Nt}Ns{Ns}Ls{Ls}_mpv{mpv}alpha{alpha}a5{a5}M5{M5}.pdf"
+        ),
+
+    shell:
+        r"""
+        cp "{input.mres}" "{output.mres_cp}"
+        """
+
+rule copy_topcharge_to_assets:
+    input:
+        q0  ="intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/topcharge_0.pdf",
+        qw0 = "intermediary_data/NF{NF}/Nt{Nt}/Ns{Ns}/Ls{Ls}/B{beta}/M{mass}/mpv{mpv}/alpha{alpha}/a5{a5}/M5{M5}/wflow/topcharge_w0.pdf",
+    output:
+        q0_cp=(
+            "assets/plots/spectrum/wflow/"
+            "topcharge_0_NF{NF}_B{beta}M{mass}_Nt{Nt}Ns{Ns}Ls{Ls}_mpv{mpv}alpha{alpha}a5{a5}M5{M5}.pdf"
+        ),
+        qw0_cp=(
+            "assets/plots/spectrum/wflow/"
+            "topcharge_w0_NF{NF}_B{beta}M{mass}_Nt{Nt}Ns{Ns}Ls{Ls}_mpv{mpv}alpha{alpha}a5{a5}M5{M5}.pdf"
+        ),
+    shell:
+        r"""
+        cp "{input.q0}" "{output.q0_cp}"
+        cp "{input.qw0}" "{output.qw0_cp}"
+        """
+
+
+# -------------------------------------------------#
+# CSV files
+# -------------------------------------------------#
+# 1) Single ensembles: mres, mps, mv, w0, fps, Z
+# 2) finite volume
+# 3) spectrum                           
+# -------------------------------------------------#
+
+
+rule single_ensembles:
+    input:
+        metadata = "metadata/ensembles.csv"
+    output:
+        csv = "metadata/output/single_ensembles.csv"
+    conda:
+        "envs/analysis.yml"
+    shell:
+        "python src/csv/single_ensembles.py "
+        "--input_file {input.metadata} "
+        "--output_file {output.csv}"
 
