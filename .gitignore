@@ -11,4 +11,4 @@ workflow/Snakefile copy
 src/hmc/log_ensembles_extract_old.py
 src/hmc/table_hmc copy.py
 src/spectrum/fps_mps_plot_old.py
-
+src/residual_mass/table_ensembles_parameters_mres_corrfit copy.py
