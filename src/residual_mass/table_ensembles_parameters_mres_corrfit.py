@@ -169,6 +169,12 @@ def read_mres_json(path):
         "tau_int_ptll_err": to_float(
             safe_get(data, "mres_extract", "ptll_tau_int", "tau_int_err", default=np.nan)
         ),
+        "tau_int_pj5q": to_float(
+            safe_get(data, "mres_extract", "pj5q_tau_int", "tau_int", default=np.nan)
+        ),
+        "tau_int_pj5q_err": to_float(
+            safe_get(data, "mres_extract", "pj5q_tau_int", "tau_int_err", default=np.nan)
+        ),
 
         "_source_file": str(path),
     }
@@ -289,6 +295,10 @@ def build_dataframe(mres_files, metadata_csv, use_name):
         lambda r: format_phys_err(r["tau_int_ptll"], r["tau_int_ptll_err"]),
         axis=1
     )
+    df["tau_int_pj5q_fmt"] = df.apply(
+        lambda r: format_phys_err(r["tau_int_pj5q"], r["tau_int_pj5q_err"]),
+        axis=1
+    )
 
     df = (
         df.sort_values(["_meta_order", "name"])
@@ -311,21 +321,21 @@ def build_table(df, output_table, use_name):
             "Ensemble & $\\beta$ & $am_0$ & $N_t$ & $N_s$ & $L_s$ & "
             "$\\alpha$ & $a_5/a$ & $am_5$ & $am_{\\rm PV}$ & "
             "$n_{\\rm cfg}$ & $\\delta_{\\rm traj}^{\\rm PS}$ & "
-            "$\\tau_{\\rm int}^{\\rm PS}$ & "
+            "$\\tau_{\\rm int}^{\\rm PS}$ & $\\tau_{\\rm int}^{J_{5q}}$ & "
             "$am_{\\rm res}(aN_t/2)$ \\\\\n"
         )
-        longtable_spec = "|c|c|c|c|c|c|c|c|c|c|c|c|c|c|"
+        longtable_spec = "|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|"
     else:
         header_line = (
             "Ensemble & $\\beta$ & $am_0$ & $N_t$ & $N_s$ & $L_s$ & "
             "$\\alpha$ & $a_5/a$ & $am_5$ & $am_{\\rm PV}$ & "
             "$n_{\\rm cfg}$ & $\\delta_{\\rm traj}^{\\rm PS}$ & "
-            "$\\tau_{\\rm int}^{\\rm PS}$ & "
+            "$\\tau_{\\rm int}^{\\rm PS}$ & $\\tau_{\\rm int}^{J_{5q}}$ & "
             "$am_{\\rm res}$ & $\\tilde{t}^{am_{\\rm res}}_{\\rm start}$ & "
             "$\\tilde{t}^{am_{\\rm res}}_{\\rm end}$ & "
             "$\\chi^2_{\\rm red}$ \\\\\n"
         )
-        longtable_spec = "|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|"
+        longtable_spec = "|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|c|"
 
     out_dir = os.path.dirname(output_table)
     if out_dir:
@@ -376,6 +386,7 @@ def build_table(df, output_table, use_name):
                     f"{format_intish(r['n_cfg'])} & "
                     f"{format_intish(r['delta_traj_ps'])} & "
                     f"{r['tau_int_ptll_fmt']} & "
+                    f"{r['tau_int_pj5q_fmt']} & "
                     f"{r['am_res_nt_half']}"
                 )
             else:
@@ -393,6 +404,7 @@ def build_table(df, output_table, use_name):
                     f"{format_intish(r['n_cfg'])} & "
                     f"{format_intish(r['delta_traj_ps'])} & "
                     f"{r['tau_int_ptll_fmt']} & "
+                    f"{r['tau_int_pj5q_fmt']} & "
                     f"{r['am_res']} & "
                     f"{format_intish(r['plateau_start'])} & "
                     f"{format_intish(r['plateau_end'])} & "
