@@ -2,6 +2,6 @@ plot_styles: "styles/jhep.mplstyle"
 plot_filetype: ".pdf"
 W0_reference: 0.28125
 label: "yes"
-therm: 150
+bootstrap_spectrum_samples: 200
 Nc: 2
 nF: 2
