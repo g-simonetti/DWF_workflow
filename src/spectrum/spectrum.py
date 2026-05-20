@@ -21,6 +21,7 @@ Bootstrap fit:
 Outputs written to JSON:
   - standard_fit: correlated fit on the actual ensemble
   - bootstrap_fit: bootstrap summary for PP, VV, simultaneous PP+A0P
+    including per-replica fit parameters under each fit's samples key
 
 Z_A remains a standard correlated plateau fit as in the original code.
 
@@ -40,14 +41,23 @@ from pathlib import Path
 from typing import Any, Dict
 
 import numpy as np
+import gvar as gv
 import h5py
 import matplotlib.pyplot as plt
 from matplotlib.ticker import ScalarFormatter
 
-import gvar as gv
-import gvar.dataset as ds
-import corrfitter as cf
-import lsqfit
+BOOTSTRAP_DIR = Path(__file__).resolve().parents[1] / "bootstrap"
+if str(BOOTSTRAP_DIR) not in sys.path:
+    sys.path.insert(0, str(BOOTSTRAP_DIR))
+
+from bootstrap import bootstrap_from_path, bootstrap_to_jsonable
+from fps_Z_fit import (
+    bootstrap_ZA_curve,
+    compute_weighted_Z_samples,
+    fit_with_bootstrap_PP_A0P,
+)
+from ps_fit import fit_with_bootstrap_PP
+from v_fit import fit_with_bootstrap_VV
 
 plt.style.use("tableau-colorblind10")
 
@@ -61,34 +71,101 @@ def read_meson_corr(filename, name):
         data = f[f"meson/{name}/corr"][:]
         return data["re"]
 
-
 def read_ps_corr(fname):
     return read_meson_corr(fname, "meson_1")
-
 
 def read_vx_corr(fname):
     return read_meson_corr(fname, "meson_50")
 
-
 def read_vy_corr(fname):
     return read_meson_corr(fname, "meson_83")
-
 
 def read_vz_corr(fname):
     return read_meson_corr(fname, "meson_116")
 
-
 def read_L_corr(fname):
     return read_meson_corr(fname, "meson_33")  # A0,P
-
 
 def read_L2_corr(fname):
     return read_meson_corr(fname, "meson_9")   # P,A0
 
-
 def read_R_corr(fname):
     with h5py.File(fname, "r") as f:
         return f["wardIdentity/PA0"][:]["re"]
+
+
+##############################################################################
+#                              FOLDING HELPERS                               #
+##############################################################################
+
+
+def fold_even(corr):
+    """
+    Fold an even correlator C(t) = C(T-t).
+
+    Input:
+        corr shape (Ncfg, T) or (T,)
+
+    Output:
+        folded correlator shape (Ncfg, Tfold) or (Tfold,)
+        with times t = 0 .. T//2
+    """
+    corr = np.asarray(corr)
+    was_1d = (corr.ndim == 1)
+    if was_1d:
+        corr = corr[None, :]
+
+    N, T = corr.shape
+    Th = T // 2
+
+    folded = np.empty((N, Th + 1), dtype=corr.dtype)
+    folded[:, 0] = corr[:, 0]
+
+    if T % 2 == 0:
+        for t in range(1, Th):
+            folded[:, t] = 0.5 * (corr[:, t] + corr[:, T - t])
+        folded[:, Th] = corr[:, Th]
+    else:
+        for t in range(1, Th + 1):
+            folded[:, t] = 0.5 * (corr[:, t] + corr[:, T - t])
+
+    return folded[0] if was_1d else folded
+
+
+def fold_odd(corr):
+    """
+    Fold an odd correlator C(t) = -C(T-t).
+
+    Input:
+        corr shape (Ncfg, T) or (T,)
+
+    Output:
+        folded correlator shape (Ncfg, Tfold) or (Tfold,)
+        with times t = 0 .. T//2
+    """
+    corr = np.asarray(corr)
+    was_1d = (corr.ndim == 1)
+    if was_1d:
+        corr = corr[None, :]
+
+    N, T = corr.shape
+    Th = T // 2
+
+    folded = np.empty((N, Th + 1), dtype=corr.dtype)
+
+    # odd correlator vanishes at t=0
+    folded[:, 0] = 0.0
+
+    if T % 2 == 0:
+        for t in range(1, Th):
+            folded[:, t] = 0.5 * (corr[:, t] - corr[:, T - t])
+        # midpoint also vanishes for exact odd symmetry
+        folded[:, Th] = 0.0
+    else:
+        for t in range(1, Th + 1):
+            folded[:, t] = 0.5 * (corr[:, t] - corr[:, T - t])
+
+    return folded[0] if was_1d else folded
 
 
 ##############################################################################
@@ -112,7 +189,7 @@ def eff_mass_hyperbolic(C):
 
 def bootstrap_effmass(corr, n_boot, boot_idx):
     """
-    Bootstrap effective mass for unfolded correlators.
+    Bootstrap effective mass for correlators.
 
     Assumes corr has shape (Ncfg, T).
     Effective mass is computed on the full valid range t = 1..T-2.
@@ -147,461 +224,6 @@ def bootstrap_effmass(corr, n_boot, boot_idx):
             std[i] = vals.std(ddof=1)
 
     return t_vals, mean, std
-
-
-##############################################################################
-#                      CORRFITTER FIT HELPERS                                #
-##############################################################################
-
-
-def _guess_m_from_effmass(cmean, t0, t1):
-    teff, meff = eff_mass_hyperbolic(cmean)
-    mask = (teff >= t0 + 1) & (teff <= t1 - 1)
-    m0 = float(np.mean(meff[mask])) if np.any(mask) else 0.1
-    if not np.isfinite(m0) or m0 <= 0:
-        m0 = 0.1
-    return m0
-
-
-def _guess_Afit_from_corr(cmean, m0, t_ref):
-    """
-    For symmetric correlator:
-      C(t) ~ Afit^2 * exp(-m t)  (ignoring backward term)
-    So Afit ~ sqrt( |C(t)| * exp(m t) ).
-    """
-    t_ref = int(t_ref)
-    t_ref = max(0, min(t_ref, len(cmean) - 1))
-    C = float(cmean[t_ref])
-    A2 = abs(C) * np.exp(m0 * t_ref)
-    return float(np.sqrt(max(A2, 1e-16)))
-
-
-def _dataset_from_samples(sample_map):
-    """
-    Build a gvar.dataset.Dataset from arrays with shape (Ncfg, T).
-
-    Each configuration is appended as one Monte Carlo sample, matching the
-    corrfitter/gvar.dataset workflow more closely.
-    """
-    keys = list(sample_map.keys())
-    arrays = {}
-
-    ref_shape = None
-    for k, v in sample_map.items():
-        arr = np.asarray(v, dtype=float)
-        if arr.ndim != 2:
-            raise ValueError(f"{k} must have shape (Ncfg, T), got {arr.shape}")
-        if ref_shape is None:
-            ref_shape = arr.shape
-        elif arr.shape != ref_shape:
-            raise ValueError(
-                f"All sample arrays must have the same shape; "
-                f"{k} has {arr.shape}, expected {ref_shape}"
-            )
-        arrays[k] = arr
-
-    ncfg, _ = ref_shape
-    dset = ds.Dataset()
-    for icfg in range(ncfg):
-        for k in keys:
-            dset.append(k, arrays[k][icfg])
-    return dset
-
-
-def _fit_stats(fit) -> Dict[str, Any]:
-    return {
-        "chi2": float(fit.chi2),
-        "dof": int(fit.dof),
-        "chi2_over_dof": _chi2_over_dof(float(fit.chi2), int(fit.dof)),
-        "Q": _finite_or_none(float(getattr(fit, "Q", np.nan))),
-        "logGBF": _finite_or_none(float(getattr(fit, "logGBF", np.nan))),
-    }
-
-
-def _bootstrap_fit_stats(chi2_samples, dof: int) -> Dict[str, Any]:
-    """
-    Bootstrap analogue of _fit_stats with the same JSON structure where possible.
-
-    Since bootstrap fits produce an ensemble of chi2 values, chi2 and chi2_over_dof
-    are reported as {mean, sdev}. Q and logGBF are left as null.
-    """
-    chi2_samples = np.asarray(chi2_samples, dtype=float)
-    chi2_samples = chi2_samples[np.isfinite(chi2_samples)]
-
-    if chi2_samples.size == 0:
-        return {
-            "chi2": None,
-            "dof": int(dof),
-            "chi2_over_dof": None,
-            "Q": None,
-            "logGBF": None,
-        }
-
-    chi2_mean = float(np.mean(chi2_samples))
-    chi2_sdev = float(np.std(chi2_samples, ddof=1)) if chi2_samples.size >= 2 else 0.0
-
-    if dof is not None and dof > 0:
-        chi2_over_dof = {
-            "mean": chi2_mean / float(dof),
-            "sdev": chi2_sdev / float(dof),
-        }
-    else:
-        chi2_over_dof = None
-
-    return {
-        "chi2": {"mean": chi2_mean, "sdev": chi2_sdev},
-        "dof": int(dof),
-        "chi2_over_dof": chi2_over_dof,
-        "Q": None,
-        "logGBF": None,
-    }
-
-
-def make_models_PP(T, t0, t1):
-    return [
-        cf.Corr2(
-            datatag="PP",
-            a="Afit", b="Afit", dE="m_ps",
-            tp=+T,
-            tdata=np.arange(T),
-            tfit=np.arange(t0, t1 + 1),
-        )
-    ]
-
-
-def make_models_VV(T, t0, t1):
-    return [
-        cf.Corr2(
-            datatag="VV",
-            a="AfitV", b="AfitV", dE="m_v",
-            tp=+T,
-            tdata=np.arange(T),
-            tfit=np.arange(t0, t1 + 1),
-        )
-    ]
-
-
-def make_models_PP_A0P(T, t0, t1):
-    return [
-        cf.Corr2(
-            datatag="PP",
-            a="Afit", b="Afit", dE="m_ps",
-            tp=+T,
-            tdata=np.arange(T),
-            tfit=np.arange(t0, t1 + 1),
-        ),
-        cf.Corr2(
-            datatag="A0P",
-            a="Afit", b="g", dE="m_ps",
-            tp=-T,
-            tdata=np.arange(T),
-            tfit=np.arange(t0, t1 + 1),
-        ),
-    ]
-
-
-def make_prior_PP(ps_samples, t0, t1):
-    cmean = np.mean(ps_samples, axis=0)
-    m0 = _guess_m_from_effmass(cmean, t0, t1)
-    A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
-
-    prior = gv.BufferDict()
-    prior["log(Afit)"] = gv.gvar([np.log(A0)], [100.0])
-    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [100.0])
-    return prior
-
-
-def make_prior_VV(v_samples, t0, t1):
-    cmean = np.mean(v_samples, axis=0)
-    m0 = _guess_m_from_effmass(cmean, t0, t1)
-    A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
-
-    prior = gv.BufferDict()
-    prior["log(AfitV)"] = gv.gvar([np.log(A0)], [100.0])
-    prior["log(m_v)"] = gv.gvar([np.log(m0)], [100.0])
-    return prior
-
-
-def make_prior_PP_A0P(ps_samples, t0, t1):
-    cmean = np.mean(ps_samples, axis=0)
-    m0 = _guess_m_from_effmass(cmean, t0, t1)
-    A0 = _guess_Afit_from_corr(cmean, m0, t_ref=t0)
-
-    prior = gv.BufferDict()
-    prior["log(Afit)"] = gv.gvar([np.log(A0)], [100.0])
-    prior["log(m_ps)"] = gv.gvar([np.log(m0)], [100.0])
-    prior["g"] = gv.gvar([0.0], [100.0])
-    return prior
-
-
-def fit_with_bootstrap_PP(ps_samples, t0, t1, n_boot=200, svdcut=1e-8):
-    """
-    Standard + bootstrap correlated fit for PP using corrfitter.
-    """
-    ps_samples = np.asarray(ps_samples, dtype=float)
-    _, T = ps_samples.shape
-
-    dset = _dataset_from_samples({"PP": ps_samples})
-    data = ds.avg_data(dset)
-
-    models = make_models_PP(T, t0, t1)
-    prior = make_prior_PP(ps_samples, t0, t1)
-    fitter = cf.CorrFitter(models=models)
-
-    fit = fitter.lsqfit(prior=prior, data=data, svdcut=svdcut)
-
-    bs_datalist = (
-        ds.avg_data(d)
-        for d in ds.bootstrap_iter(dset, n_boot)
-    )
-
-    bs = ds.Dataset()
-    bs_chi2 = []
-    n_success = 0
-
-    for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
-        p = bs_fit.pmean
-        bs.append("m_ps", [float(np.asarray(p["m_ps"])[0])])
-        bs.append("Afit", [float(np.asarray(p["Afit"])[0])])
-        bs_chi2.append(float(bs_fit.chi2))
-        n_success += 1
-
-    if n_success == 0:
-        raise RuntimeError("All bootstrap PP fits failed.")
-
-    bs = ds.avg_data(bs, bstrap=True)
-
-    return {
-        "fit": fit,
-        "bootstrap": bs,
-        "bootstrap_fit_stats": _bootstrap_fit_stats(bs_chi2, int(fit.dof)),
-        "bootstrap_meta": {
-            "n_requested": int(n_boot),
-            "n_success": int(n_success),
-            "n_failed": int(n_boot - n_success),
-        },
-    }
-
-
-def fit_with_bootstrap_VV(v_samples, t0, t1, n_boot=200, svdcut=1e-8):
-    """
-    Standard + bootstrap correlated fit for VV using corrfitter.
-    """
-    v_samples = np.asarray(v_samples, dtype=float)
-    _, T = v_samples.shape
-
-    dset = _dataset_from_samples({"VV": v_samples})
-    data = ds.avg_data(dset)
-
-    models = make_models_VV(T, t0, t1)
-    prior = make_prior_VV(v_samples, t0, t1)
-    fitter = cf.CorrFitter(models=models)
-
-    fit = fitter.lsqfit(prior=prior, data=data, svdcut=svdcut)
-
-    bs_datalist = (
-        ds.avg_data(d)
-        for d in ds.bootstrap_iter(dset, n_boot)
-    )
-
-    bs = ds.Dataset()
-    bs_chi2 = []
-    n_success = 0
-
-    for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
-        p = bs_fit.pmean
-        bs.append("m_v", [float(np.asarray(p["m_v"])[0])])
-        bs.append("AfitV", [float(np.asarray(p["AfitV"])[0])])
-        bs_chi2.append(float(bs_fit.chi2))
-        n_success += 1
-
-    if n_success == 0:
-        raise RuntimeError("All bootstrap VV fits failed.")
-
-    bs = ds.avg_data(bs, bstrap=True)
-
-    return {
-        "fit": fit,
-        "bootstrap": bs,
-        "bootstrap_fit_stats": _bootstrap_fit_stats(bs_chi2, int(fit.dof)),
-        "bootstrap_meta": {
-            "n_requested": int(n_boot),
-            "n_success": int(n_success),
-            "n_failed": int(n_boot - n_success),
-        },
-    }
-
-
-def fit_with_bootstrap_PP_A0P(ps_samples, a0p_samples, t0, t1, Ns, n_boot=200, svdcut=1e-8):
-    """
-    Standard + bootstrap simultaneous correlated fit for PP + A0P using corrfitter.
-    """
-    ps_samples = np.asarray(ps_samples, dtype=float)
-    a0p_samples = np.asarray(a0p_samples, dtype=float)
-
-    if ps_samples.shape != a0p_samples.shape:
-        raise ValueError(
-            f"PP and A0P samples must have the same shape, got "
-            f"{ps_samples.shape} and {a0p_samples.shape}"
-        )
-    if Ns <= 0:
-        raise RuntimeError("--Ns must be > 0 (needed for f_PS normalisation).")
-
-    _, T = ps_samples.shape
-
-    dset = _dataset_from_samples({
-        "PP": ps_samples,
-        "A0P": a0p_samples,
-    })
-    data = ds.avg_data(dset)
-
-    models = make_models_PP_A0P(T, t0, t1)
-    prior = make_prior_PP_A0P(ps_samples, t0, t1)
-    fitter = cf.CorrFitter(models=models)
-
-    fit = fitter.lsqfit(prior=prior, data=data, svdcut=svdcut)
-
-    m_ps_std = fit.p["m_ps"][0]
-    g_std = fit.p["g"][0]
-    fPS_std = -gv.sqrt(2.0) * g_std / gv.sqrt(m_ps_std) / (Ns ** 1.5)
-
-    bs_datalist = (
-        ds.avg_data(d)
-        for d in ds.bootstrap_iter(dset, n_boot)
-    )
-
-    bs = ds.Dataset()
-    bs_chi2 = []
-    n_success = 0
-
-    for bs_fit in fitter.bootstrapped_fit_iter(datalist=bs_datalist):
-        p = bs_fit.pmean
-
-        m_ps_b = float(np.asarray(p["m_ps"])[0])
-        Afit_b = float(np.asarray(p["Afit"])[0])
-        g_b = float(np.asarray(p["g"])[0])
-        f_ps_b = -np.sqrt(2.0) * g_b / np.sqrt(m_ps_b) / (Ns ** 1.5)
-
-        bs.append("m_ps", [m_ps_b])
-        bs.append("Afit", [Afit_b])
-        bs.append("g", [g_b])
-        bs.append("f_ps", [f_ps_b])
-        bs_chi2.append(float(bs_fit.chi2))
-        n_success += 1
-
-    if n_success == 0:
-        raise RuntimeError("All bootstrap simultaneous PP+A0P fits failed.")
-
-    bs = ds.avg_data(bs, bstrap=True)
-
-    return {
-        "fit": fit,
-        "fPS_fit_gvar": fPS_std,
-        "bootstrap": bs,
-        "bootstrap_fit_stats": _bootstrap_fit_stats(bs_chi2, int(fit.dof)),
-        "bootstrap_meta": {
-            "n_requested": int(n_boot),
-            "n_success": int(n_success),
-            "n_failed": int(n_boot - n_success),
-        },
-    }
-
-
-##############################################################################
-#                                   Z_A                                      #
-##############################################################################
-
-
-def compute_ZA(L, R):
-    L = np.asarray(L)
-    R = np.asarray(R)
-    T = len(L)
-    tvals = np.arange(1, T - 1)
-    Z = np.zeros_like(tvals, float)
-
-    for i, t in enumerate(tvals):
-        Rf = R[t]
-        Rb = R[t - 1]
-        Lt = L[t]
-        Ltp = L[t + 1]
-
-        term1 = (Rf + Rb) / (2 * Lt)
-        term2 = 2 * Rf / (Lt + Ltp)
-        Z[i] = 0.5 * (term1 + term2)
-    return tvals, Z
-
-
-def build_Z_samples(Lcorr, Rcorr):
-    """
-    Build per-configuration Z_A(t) samples without folding.
-
-    Returns:
-      tvals: t = 1..T-2
-      Z_samples: shape (Ncfg, T-2)
-    """
-    Lcorr = np.asarray(Lcorr)
-    Rcorr = np.asarray(Rcorr)
-    if Lcorr.shape != Rcorr.shape or Lcorr.ndim != 2:
-        raise ValueError("build_Z_samples expects Lcorr and Rcorr with shape (Ncfg, T)")
-
-    N, _ = Lcorr.shape
-    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])
-    nt = len(tvals)
-
-    Z_samples = np.empty((N, nt), dtype=float)
-    for i in range(N):
-        _, Zi = compute_ZA(Lcorr[i], Rcorr[i])
-        Z_samples[i] = Zi
-
-    return tvals, Z_samples
-
-
-def fit_Z_only(Z_samples, t0, t1, svdcut=1e-8):
-    """
-    Correlated constant fit to Z(t) on [t0, t1].
-    Z_samples: (Ncfg, nt) with nt = T-2 corresponding to t=1..T-2.
-    """
-    Z_samples = np.asarray(Z_samples)
-    _, nt = Z_samples.shape
-    tvals = np.arange(1, nt + 1)
-
-    Zg = gv.dataset.avg_data({"Z": Z_samples})["Z"]
-
-    mask = (tvals >= t0) & (tvals <= t1)
-    if not np.any(mask):
-        raise ValueError(f"fit_Z_only: empty fit window [{t0},{t1}] for t=1..{nt}")
-
-    y = Zg[mask]
-
-    prior = gv.BufferDict()
-    prior["Z0"] = gv.gvar(1.0, 10.0)
-
-    def fcn(p):
-        return p["Z0"] * np.ones(len(y))
-
-    return lsqfit.nonlinear_fit(data=y, prior=prior, fcn=fcn, svdcut=svdcut)
-
-
-def bootstrap_ZA_curve(Lcorr, Rcorr, n_boot, boot_idx):
-    """
-    Bootstrap mean/std of Z_A(t) for plotting without folding.
-    """
-    Lcorr = np.asarray(Lcorr)
-    Rcorr = np.asarray(Rcorr)
-
-    tvals, _ = compute_ZA(Lcorr[0], Rcorr[0])
-    nt = len(tvals)
-
-    Zb = np.empty((n_boot, nt), dtype=float)
-
-    for b in range(n_boot):
-        idx = boot_idx[b]
-        Lm = Lcorr[idx].mean(axis=0)
-        Rm = Rcorr[idx].mean(axis=0)
-        _, Zt = compute_ZA(Lm, Rm)
-        Zb[b] = Zt
-
-    return tvals, Zb.mean(axis=0), Zb.std(axis=0, ddof=1)
 
 
 ##############################################################################
@@ -793,10 +415,8 @@ def _select_pairs_by_number(pt_map, mr_map, common_nums, therm, delta_traj):
 def _finite_or_none(x: float) -> float | None:
     return None if (x is None or not np.isfinite(x)) else float(x)
 
-
 def _gvar_to_obj(g: gv.GVar) -> Dict[str, float]:
     return {"mean": float(gv.mean(g)), "sdev": float(gv.sdev(g))}
-
 
 def _chi2_over_dof(chi2: float, dof: int) -> float | None:
     if dof is None or dof <= 0:
@@ -804,6 +424,71 @@ def _chi2_over_dof(chi2: float, dof: int) -> float | None:
     val = float(chi2) / float(dof)
     return _finite_or_none(val)
 
+def _fit_stats(fit) -> Dict[str, Any]:
+    return {
+        "chi2": float(fit.chi2),
+        "dof": int(fit.dof),
+        "chi2_over_dof": _chi2_over_dof(float(fit.chi2), int(fit.dof)),
+        "Q": _finite_or_none(float(getattr(fit, "Q", np.nan))),
+        "logGBF": _finite_or_none(float(getattr(fit, "logGBF", np.nan))),
+    }
+
+
+def _summary_from_sample_list(samples, key) -> Dict[str, float] | None:
+    values = np.array(
+        [sample[key] for sample in samples if sample is not None and key in sample],
+        dtype=float,
+    )
+    if values.size == 0:
+        return None
+    return {
+        "mean": float(np.mean(values)),
+        "sdev": float(np.std(values, ddof=1)) if values.size >= 2 else 0.0,
+    }
+
+
+def _bootstrap_fit_stats_from_samples(samples, dof: int) -> Dict[str, Any]:
+    chi2 = _summary_from_sample_list(samples, "chi2")
+    if chi2 is None:
+        chi2_over_dof = None
+    elif dof > 0:
+        chi2_over_dof = {
+            "mean": chi2["mean"] / float(dof),
+            "sdev": chi2["sdev"] / float(dof),
+        }
+    else:
+        chi2_over_dof = None
+
+    return {
+        "chi2": chi2,
+        "dof": int(dof),
+        "chi2_over_dof": chi2_over_dof,
+        "Q": None,
+        "logGBF": None,
+    }
+
+
+def _bootstrap_meta_from_samples(samples, n_requested: int) -> Dict[str, int]:
+    n_success = sum(
+        sample is not None and "error" not in sample
+        for sample in samples
+    )
+    return {
+        "n_requested": int(n_requested),
+        "n_success": int(n_success),
+        "n_failed": int(n_requested - n_success),
+    }
+
+
+def _bootstrap_failures_from_samples(samples):
+    failures = []
+    for i, sample in enumerate(samples):
+        if sample is not None and "error" in sample:
+            failures.append({
+                "index": int(sample.get("index", i)),
+                "error": str(sample["error"]),
+            })
+    return failures
 
 ##############################################################################
 #                                   MAIN                                     #
@@ -930,43 +615,89 @@ def main():
         Ls = np.array(Ls, dtype=float)
         Rs = np.array(Rs, dtype=float)
 
+        # Original ensemble shape before folding
+        N, T_full = ps.shape
+
+        # Fold correlators configuration by configuration
+        ps = fold_even(ps)
+        v = fold_even(v)
+        a0p = fold_odd(a0p)
+
         N, T = ps.shape
-        result["data_shape"] = {"Ncfg": int(N), "T": int(T)}
+        result["data_shape"] = {
+            "Ncfg": int(N),
+            "T_full": int(T_full),
+            "T_folded": int(T),
+            "ps_folded": True,
+            "v_folded": True,
+            "a0p_folded": True,
+            "a0p_fold_type": "odd",
+            "Z_folded": False,
+        }
 
-        rng = np.random.default_rng()
-        boot_idx = rng.integers(0, N, size=(args.n_boot, N))
+        # Sanity checks for folded PS/V windows
+        if not (0 <= ps0 < ps1 < T):
+            raise RuntimeError(
+                f"Invalid PS plateau window after folding: [{ps0}, {ps1}] with folded T={T}"
+            )
+        if not (0 <= v0 < v1 < T):
+            raise RuntimeError(
+                f"Invalid V plateau window after folding: [{v0}, {v1}] with folded T={T}"
+            )
+        if not (0 <= fps0 < fps1 < T):
+            raise RuntimeError(
+                f"Invalid FPS plateau window after folding: [{fps0}, {fps1}] with folded T={T}"
+            )
 
+        bootstrap = bootstrap_from_path(mesons_dir, nums_used, args.n_boot)
+        boot_idx = np.asarray(bootstrap["boot_idx"], dtype=int)
+        result["bootstrap"] = bootstrap_to_jsonable(bootstrap)
+
+        # Effective masses are now computed from folded PS/V correlators
         tps, meps, eeps = bootstrap_effmass(ps, args.n_boot, boot_idx)
         tv, mev, eev = bootstrap_effmass(v, args.n_boot, boot_idx)
         ta, mea0p, ea0p = bootstrap_effmass(a0p, args.n_boot, boot_idx)
 
-        pp_res = fit_with_bootstrap_PP(ps, ps0, ps1, n_boot=args.n_boot, svdcut=args.svdcut)
-        vv_res = fit_with_bootstrap_VV(v, v0, v1, n_boot=args.n_boot, svdcut=args.svdcut)
+        pp_res = fit_with_bootstrap_PP(
+            ps, ps0, ps1, Nt_full=T_full, n_boot=args.n_boot, boot_idx=boot_idx, svdcut=args.svdcut
+        )
+        vv_res = fit_with_bootstrap_VV(
+            v, v0, v1, Nt_full=T_full, n_boot=args.n_boot, boot_idx=boot_idx, svdcut=args.svdcut
+        )
         sim_res = fit_with_bootstrap_PP_A0P(
-            ps, a0p, fps0, fps1, Ns=args.Ns, n_boot=args.n_boot, svdcut=args.svdcut
+            ps, a0p, fps0, fps1, Ns=args.Ns, Nt_full=T_full, n_boot=args.n_boot, boot_idx=boot_idx, svdcut=args.svdcut
         )
 
         fit_pp = pp_res["fit"]
         fit_vv = vv_res["fit"]
         fit_sim = sim_res["fit"]
+        pp_samples = pp_res["bootstrap_samples"]
+        vv_samples = vv_res["bootstrap_samples"]
+        sim_samples = sim_res["bootstrap_samples"]
+        pp_failures = pp_res.get("bootstrap_failures", _bootstrap_failures_from_samples(pp_samples))
+        vv_failures = vv_res.get("bootstrap_failures", _bootstrap_failures_from_samples(vv_samples))
+        sim_failures = sim_res.get("bootstrap_failures", _bootstrap_failures_from_samples(sim_samples))
 
         mps_pp_gv = fit_pp.p["m_ps"][0]
         mv_gv = fit_vv.p["m_v"][0]
         mps_sim_gv = fit_sim.p["m_ps"][0]
-        fPS_std_gv = sim_res["fPS_fit_gvar"]
+        fPS_std_gv = -gv.sqrt(1.0) * fit_sim.p["g"][0] / gv.sqrt(fit_sim.p["m_ps"][0])
+        fPS_std_gv /= (args.Ns ** 1.5)
 
-        _, Z_samples = build_Z_samples(Ls, Rs)
         tZ_plot, Zt_plot, Zerr_plot = bootstrap_ZA_curve(Ls, Rs, args.n_boot, boot_idx)
-
-        fit_Z = fit_Z_only(Z_samples, z0, z1, svdcut=args.svdcut)
+        fit_Z, z_samples = compute_weighted_Z_samples(
+            Ls, Rs, z0, z1, args.n_boot, boot_idx, args.svdcut
+        )
         Zplat_gv = fit_Z.p["Z0"]
 
+        # PS plot now uses folded effective mass + folded fit result
         plot_effmass(
             tps, meps, eeps, ps0, ps1,
             float(gv.mean(mps_pp_gv)), float(gv.sdev(mps_pp_gv)),
             args.plot_ps, args.label, args.beta, args.mass, "PS"
         )
 
+        # V plot now uses folded effective mass + folded fit result
         plot_effmass(
             tv, mev, eev, v0, v1,
             float(gv.mean(mv_gv)), float(gv.sdev(mv_gv)),
@@ -982,7 +713,7 @@ def main():
             args.plot_fps, args.label, args.beta, args.mass
         )
 
-        tmax = T // 2 - 2
+        tmax = T_full // 2 - 2
         mask = tZ_plot <= tmax
 
         plot_plateau(
@@ -994,21 +725,21 @@ def main():
         result["results"] = {
             "standard_fit": {
                 "PP": {
-                    "am_ps": _gvar_to_obj(pp_res["fit"].p["m_ps"][0]),
-                    "Afit": _gvar_to_obj(pp_res["fit"].p["Afit"][0]),
-                    "fit_stats": _fit_stats(pp_res["fit"]),
+                    "am_ps": _gvar_to_obj(fit_pp.p["m_ps"][0]),
+                    "Afit": _gvar_to_obj(fit_pp.p["Afit"][0]),
+                    "fit_stats": _fit_stats(fit_pp),
                 },
                 "VV": {
-                    "am_v": _gvar_to_obj(vv_res["fit"].p["m_v"][0]),
-                    "AfitV": _gvar_to_obj(vv_res["fit"].p["AfitV"][0]),
-                    "fit_stats": _fit_stats(vv_res["fit"]),
+                    "am_v": _gvar_to_obj(fit_vv.p["m_v"][0]),
+                    "AfitV": _gvar_to_obj(fit_vv.p["AfitV"][0]),
+                    "fit_stats": _fit_stats(fit_vv),
                 },
                 "simultaneous_PP_A0P": {
-                    "am_ps": _gvar_to_obj(sim_res["fit"].p["m_ps"][0]),
-                    "Afit": _gvar_to_obj(sim_res["fit"].p["Afit"][0]),
-                    "g": _gvar_to_obj(sim_res["fit"].p["g"][0]),
-                    "af_ps": _gvar_to_obj(sim_res["fPS_fit_gvar"]),
-                    "fit_stats": _fit_stats(sim_res["fit"]),
+                    "am_ps": _gvar_to_obj(fit_sim.p["m_ps"][0]),
+                    "Afit": _gvar_to_obj(fit_sim.p["Afit"][0]),
+                    "g": _gvar_to_obj(fit_sim.p["g"][0]),
+                    "af_ps": _gvar_to_obj(fPS_std_gv),
+                    "fit_stats": _fit_stats(fit_sim),
                 },
                 "Z_A": {
                     "Z_A": _gvar_to_obj(Zplat_gv),
@@ -1017,24 +748,38 @@ def main():
             },
             "bootstrap_fit": {
                 "PP": {
-                    "am_ps": _gvar_to_obj(pp_res["bootstrap"]["m_ps"][0]),
-                    "Afit": _gvar_to_obj(pp_res["bootstrap"]["Afit"][0]),
+                    "am_ps": _summary_from_sample_list(pp_samples, "m_ps"),
+                    "Afit": _summary_from_sample_list(pp_samples, "Afit"),
                     "fit_stats": pp_res["bootstrap_fit_stats"],
                     "meta": pp_res["bootstrap_meta"],
+                    "samples": pp_samples,
+                    "failures": pp_failures,
                 },
                 "VV": {
-                    "am_v": _gvar_to_obj(vv_res["bootstrap"]["m_v"][0]),
-                    "AfitV": _gvar_to_obj(vv_res["bootstrap"]["AfitV"][0]),
+                    "am_v": _summary_from_sample_list(vv_samples, "m_v"),
+                    "AfitV": _summary_from_sample_list(vv_samples, "AfitV"),
                     "fit_stats": vv_res["bootstrap_fit_stats"],
                     "meta": vv_res["bootstrap_meta"],
+                    "samples": vv_samples,
+                    "failures": vv_failures,
                 },
                 "simultaneous_PP_A0P": {
-                    "am_ps": _gvar_to_obj(sim_res["bootstrap"]["m_ps"][0]),
-                    "Afit": _gvar_to_obj(sim_res["bootstrap"]["Afit"][0]),
-                    "g": _gvar_to_obj(sim_res["bootstrap"]["g"][0]),
-                    "af_ps": _gvar_to_obj(sim_res["bootstrap"]["f_ps"][0]),
+                    "am_ps": _summary_from_sample_list(sim_samples, "m_ps"),
+                    "Afit": _summary_from_sample_list(sim_samples, "Afit"),
+                    "g": _summary_from_sample_list(sim_samples, "g"),
+                    "af_ps": _summary_from_sample_list(sim_samples, "f_ps"),
                     "fit_stats": sim_res["bootstrap_fit_stats"],
                     "meta": sim_res["bootstrap_meta"],
+                    "samples": sim_samples,
+                    "failures": sim_failures,
+                },
+                "Z_A": {
+                    "Z_A": _summary_from_sample_list(z_samples, "Z_A"),
+                    "Z_A_err": _summary_from_sample_list(z_samples, "Z_A_err"),
+                    "fit_stats": _bootstrap_fit_stats_from_samples(z_samples, int(fit_Z.dof)),
+                    "meta": _bootstrap_meta_from_samples(z_samples, args.n_boot),
+                    "samples": z_samples,
+                    "failures": _bootstrap_failures_from_samples(z_samples),
                 },
             },
             "summary": {
@@ -1059,7 +804,18 @@ def main():
     with open(out_path, "w") as f:
         json.dump(result, f, indent=2, sort_keys=True)
 
-    print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("ok", False):
+        print(
+            f"[spectrum] Saved {args.spectrum_out} "
+            f"with {result['selection']['n_used']} selected cfgs and "
+            f"{result['bootstrap']['n_boot']} bootstrap replicas",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[spectrum] Failed: {result['error']['type']}: {result['error']['message']}",
+            file=sys.stderr,
+        )
 
     if not result.get("ok", False):
         raise SystemExit(2)
