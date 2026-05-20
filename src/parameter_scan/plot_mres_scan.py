@@ -143,7 +143,7 @@ def mass_to_color(mass: float):
 
 
 # ------------------------------------------------------------
-# merged_m grouping (unchanged)
+# merged_m grouping 
 # ------------------------------------------------------------
 SCAN_PARAMS = ["alpha", "a5", "M5", "mpv"]
 ALL_KEYS = ["Nt", "Ns", "Ls", "beta", "mass", "mpv", "alpha", "a5", "M5"]
@@ -193,7 +193,7 @@ def make_subplot_title(param, ref):
 
 
 # ------------------------------------------------------------
-# Plot merged_m (unchanged)
+# Plot merged_m 
 # ------------------------------------------------------------
 def plot_merged_m(groups, outname):
     line_styles = ["--", ":"]
