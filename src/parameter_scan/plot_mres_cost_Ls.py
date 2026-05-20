@@ -19,9 +19,9 @@ parser = argparse.ArgumentParser(
     description=(
         "Two-beta plotting utility.\n"
         "1) Ls scan: m_res vs Ls (Shamir + all Möbius points; Möbius line uses min m_res per Ls)\n"
-        "2) Cost scan: m_res vs (tau_int_plaq * t_traj) with propagated x-error\n"
-        "   where t_traj comes from log_hmc_extract.txt and tau_int_plaq is the plaquette autocorrelation time.\n"
-        "   COST FIGURE is 2x2: top row Möbius, bottom row Shamir; left beta=7.4, right beta=7.6 (if present).\n"
+        "2) Cost scan: x-axis is m_res and uses the minimum-m_res Möbius alpha per Ls.\n"
+        "   For each beta there are three stacked panels: top is full bcs, middle is t_traj, bottom is (tau_int_ptll * t_traj).\n"
+        "   Shamir and Möbius are overlaid in the same subplot; left beta=7.4, right beta=7.6 (if present).\n"
     )
 )
 
@@ -32,7 +32,7 @@ parser.add_argument("--label", default="no")
 parser.add_argument("--plot_styles", default=None)
 
 parser.add_argument("--ls_scan", required=True, help="Output PDF for m_res vs Ls (2 betas).")
-parser.add_argument("--costs", required=True, help="Output PDF for m_res vs (tau_int_plaq * t_traj) (2 betas).")
+parser.add_argument("--costs", required=True, help="Output PDF for combined cost/bcs vs m_res figure.")
 
 args = parser.parse_args()
 show_legend = args.label.lower() == "yes"
@@ -70,6 +70,7 @@ def load_mres_extract(path: str):
     """
     Read plateau-extracted residual mass from m_res.json:
       data["mres_extract"]["value"], data["mres_extract"]["error"]
+      data["mres_extract"]["ptll_tau_int"]["tau_int"], ["tau_int_err"]
     """
     with open(path, "r") as f:
         data = json.load(f)
@@ -77,12 +78,14 @@ def load_mres_extract(path: str):
     try:
         y = data["mres_extract"]["value"]
         err = data["mres_extract"]["error"]
+        ptll_tau = data["mres_extract"]["ptll_tau_int"]["tau_int"]
+        ptll_tau_err = data["mres_extract"]["ptll_tau_int"]["tau_int_err"]
     except Exception as e:
         raise ValueError(
-            f"{path}: expected JSON with mres_extract.value and mres_extract.error"
+            f"{path}: expected JSON with mres_extract.value/error and mres_extract.ptll_tau_int.tau_int/tau_int_err"
         ) from e
 
-    return float(y), float(err)
+    return float(y), float(err), float(ptll_tau), float(ptll_tau_err)
 
 
 def load_hmc_extract(path: str):
@@ -92,11 +95,9 @@ def load_hmc_extract(path: str):
     Expected keys:
       data["hmc_extract"]["t_traj"]
       data["hmc_extract"]["t_traj_err"]
-      data["hmc_extract"]["tau_int_plaq"]
-      data["hmc_extract"]["tau_int_plaq_err"]
 
     Optional:
-      bcs, bcs_err, plaq, plaq_err (if present)
+      bcs, bcs_err, plaq, plaq_err, tau_int_plaq, tau_int_plaq_err (if present)
     """
     with open(path, "r") as f:
         data = json.load(f)
@@ -115,10 +116,9 @@ def load_hmc_extract(path: str):
 
     t_traj = get("t_traj", required=True)
     t_traj_err = get("t_traj_err", required=True)
-    tau_int_plaq = get("tau_int_plaq", required=True)
-    tau_int_plaq_err = get("tau_int_plaq_err", required=True)
-
     # optional
+    tau_int_plaq = get("tau_int_plaq", required=False)
+    tau_int_plaq_err = get("tau_int_plaq_err", required=False)
     bcs = get("bcs", required=False)
     bcs_err = get("bcs_err", required=False)
     plaq = get("plaq", required=False)
@@ -161,12 +161,12 @@ for fp in args.mres:
     if k not in hmc_lookup:
         raise ValueError(f"No matching HMC file for: {fp}")
 
-    mres, mres_err = load_mres_extract(fp)
+    mres, mres_err, tau_int_ptll, tau_int_ptll_err = load_mres_extract(fp)
     h = hmc_lookup[k]
 
     x_eff, x_eff_err = product_with_err(
         h["t_traj"], h["t_traj_err"],
-        h["tau_int_plaq"], h["tau_int_plaq_err"],
+        tau_int_ptll, tau_int_ptll_err,
     )
 
     entries.append(
@@ -175,6 +175,8 @@ for fp in args.mres:
             "filepath": fp,
             "mres": mres,
             "mres_err": mres_err,
+            "tau_int_ptll": tau_int_ptll,
+            "tau_int_ptll_err": tau_int_ptll_err,
             **h,
             "x_eff": x_eff,
             "x_eff_err": x_eff_err,
@@ -184,6 +186,8 @@ for fp in args.mres:
 if len(entries) == 0:
     print("WARNING: no entries found.")
     raise SystemExit(0)
+
+ls_marker_order = sorted({e["Ls"] for e in entries})
 
 
 # ============================================================
@@ -205,11 +209,13 @@ entries_by_beta = {b: [e for e in entries if np.isclose(e["beta"], b)] for b in 
 # ============================================================
 # Helpers
 # ============================================================
-LS_MARKERS = ["o", "s", "D", "^", "v", "P", "X", "*"]
+LS_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*"]
 
 
 def marker_from_Ls(Ls: int) -> str:
-    return LS_MARKERS[hash(Ls) % len(LS_MARKERS)]
+    if Ls in ls_marker_order:
+        return LS_MARKERS[ls_marker_order.index(Ls) % len(LS_MARKERS)]
+    return LS_MARKERS[int(Ls) % len(LS_MARKERS)]
 
 
 def _mass_str(entries_panel) -> str:
@@ -269,6 +275,10 @@ def select_mobius_min_points_per_Ls(entries_panel):
         best = min(mobius, key=lambda g: g["mres"])
         selected.append(best)
     return selected
+
+
+def finite_pair(x, y):
+    return np.isfinite(x) and np.isfinite(y)
 
 
 # ============================================================
@@ -502,111 +512,232 @@ def make_Ls_scan_figure(outname: str):
 
 
 # ============================================================
-# Panel 2: Cost scan (2x2: top Möbius, bottom Shamir)
+# Panel 2: Combined trajectory/cost/bcs scan (rows are observables, columns are betas)
 # ============================================================
-def plot_cost_mobius(ax, entries_panel, beta):
-    # yscale MUST be set before gradient connector (transform depends on it)
-    ax.set_yscale("log")
+def plot_combined_metric_panel(
+    ax,
+    entries_panel,
+    beta,
+    y_key,
+    y_err_key=None,
+    ylabel=None,
+    title=None,
+):
+    ax.set_xscale("log")
 
-    mobius_entries = select_mobius_min_points_per_Ls(entries_panel)
+    shamir_entries = sorted(
+        [e for e in entries_panel if np.isclose(e["alpha"], 1.0)],
+        key=lambda e: e["Ls"]
+    )
+    mobius_entries = sorted(select_mobius_min_points_per_Ls(entries_panel), key=lambda e: e["Ls"])
 
+    sh_x, sh_y, sh_Ls = [], [], []
     mo_x, mo_y, mo_Ls = [], [], []
 
+    for e in shamir_entries:
+        x, dx = e["mres"], e["mres_err"]
+        y = e[y_key]
+        dy = e[y_err_key] if y_err_key is not None else None
+        Ls = e["Ls"]
+
+        if not finite_pair(x, y):
+            continue
+
+        sh_x.append(x)
+        sh_y.append(y)
+        sh_Ls.append(Ls)
+
+        marker = marker_from_Ls(Ls)
+        ax.errorbar(x, y, xerr=dx, yerr=dy, fmt=marker, color="black", mec="black")
+
     for e in mobius_entries:
-        x, dx = e["x_eff"], e["x_eff_err"]
-        y, dy = e["mres"], e["mres_err"]
+        x, dx = e["mres"], e["mres_err"]
+        y = e[y_key]
+        dy = e[y_err_key] if y_err_key is not None else None
         Ls = e["Ls"]
         alpha = e["alpha"]
 
-        mo_x.append(x); mo_y.append(y); mo_Ls.append(Ls)
+        if not finite_pair(x, y):
+            continue
+
+        mo_x.append(x)
+        mo_y.append(y)
+        mo_Ls.append(Ls)
 
         marker = marker_from_Ls(Ls)
         color = alpha_to_color.get(alpha, "C1")
         ax.errorbar(x, y, xerr=dx, yerr=dy, fmt=marker, color=color, mec=color)
 
-        label_text = rf"$L_s={Ls}$" + "\n" + rf"$\alpha={alpha}$"
-        place_label(ax, x, y, label_text, "mobius", "mobius", Ls=Ls, beta=beta)
-
-    # Gradient dotted connector like in first plot, but ordered by Ls
+    connect_sorted_by_Ls(ax, sh_x, sh_y, sh_Ls, "--", "black")
     add_viridis_gradient_dotted_line_straight_by_Ls(ax, mo_x, mo_y, mo_Ls, n_per_segment=120, linewidth=0.6)
 
-    ax.set_title(rf"$\beta={beta}\; am_0={_mass_str(entries_panel)}$")
-
-    if show_legend:
-        ax.legend(
-            handles=[plt.Line2D([], [], linestyle=":", color="C1",
-                                label="Möbius")],
-            loc="upper right"
-        )
+    if title is not None:
+        ax.set_title(title, pad=28)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
 
 
-def plot_cost_shamir(ax, entries_panel, beta):
-    ax.set_yscale("log")
+def add_panel_mobius_legend(ax, entries_panel):
+    mobius_entries = sorted(select_mobius_min_points_per_Ls(entries_panel), key=lambda e: e["Ls"])
+    if not mobius_entries:
+        return
 
-    shamir_entries = [e for e in entries_panel if np.isclose(e["alpha"], 1.0)]
-
-    sh_x, sh_y, sh_Ls = [], [], []
-
-    for e in shamir_entries:
-        x, dx = e["x_eff"], e["x_eff_err"]
-        y, dy = e["mres"], e["mres_err"]
+    handles = []
+    labels = []
+    for e in mobius_entries:
         Ls = e["Ls"]
-
-        sh_x.append(x); sh_y.append(y); sh_Ls.append(Ls)
-
-        marker = marker_from_Ls(Ls)
-        ax.errorbar(x, y, xerr=dx, yerr=dy, fmt=marker, color="black", mec="black")
-
-        label_text = rf"$L_s={Ls}$"
-        place_label(ax, x, y, label_text, "shamir", "shamir", Ls=Ls, beta=beta)
-
-    connect_sorted_by_Ls(ax, sh_x, sh_y, sh_Ls, "--", "black")
-
-    if show_legend:
-        ax.legend(
-            handles=[plt.Line2D([], [], linestyle="--", color="black",
-                                label="Shamir, $\\alpha=1.0$")],
-            loc="upper right"
+        alpha = e["alpha"]
+        color = alpha_to_color.get(alpha, "C1")
+        handles.append(
+            ax.errorbar(
+                [np.nan], [np.nan],
+                xerr=[1.0], yerr=[1.0],
+                fmt=marker_from_Ls(Ls),
+                color=color,
+                mec=color,
+                linestyle="None",
+            )
         )
+        labels.append(rf"$L_s={Ls},\ \alpha={alpha}$")
+
+    legend = ax.legend(
+        handles=handles,
+        labels=labels,
+        title="Möbius",
+        loc="upper right",
+        fontsize=6.2,
+        title_fontsize=6.5,
+        ncol=1,
+        frameon=True,
+        borderpad=0.3,
+        handletextpad=0.35,
+        labelspacing=0.3,
+    )
+    legend.get_frame().set_alpha(0.95)
+
+
+def add_shared_shamir_legend(fig, top_axes):
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    top_positions = [ax.get_position() for ax in top_axes]
+    title_boxes = [
+        ax.title.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
+        for ax in top_axes
+    ]
+
+    legend_left = min(pos.x0 for pos in top_positions)
+    legend_right = max(pos.x1 for pos in top_positions)
+    axes_top = max(pos.y1 for pos in top_positions)
+    title_bottom = min(box.y0 for box in title_boxes)
+
+    gap = max(title_bottom - axes_top, 0.06)
+    legend_bottom = axes_top + 0.003
+    legend_height = max(gap - 0.008, 0.05)
+
+    legend_ax = fig.add_axes(
+        [legend_left, legend_bottom, legend_right - legend_left, legend_height],
+        frameon=False,
+    )
+    legend_ax.set_axis_off()
+
+    shamir_entries = sorted({e["Ls"] for e in entries if np.isclose(e["alpha"], 1.0)})
+
+    shamir_handles = [
+        legend_ax.errorbar(
+            [np.nan], [np.nan],
+            xerr=[1.0], yerr=[1.0],
+            fmt=marker_from_Ls(Ls),
+            color="black",
+            mec="black",
+            linestyle="None",
+        )
+        for Ls in shamir_entries
+    ]
+    inline_header = plt.Line2D([], [], linestyle="None", marker=None, alpha=0.0)
+    shamir_handles = [inline_header] + shamir_handles
+    shamir_labels = [r"Shamir $\alpha=1$"] + [rf"$L_s={Ls}$" for Ls in shamir_entries]
+
+    legend_shamir = legend_ax.legend(
+        handles=shamir_handles,
+        labels=shamir_labels,
+        loc="center",
+        bbox_to_anchor=(0.5, 0.5),
+        fontsize=6.5,
+        ncol=6,
+        frameon=True,
+        borderpad=0.35,
+        handletextpad=0.4,
+        columnspacing=1.0,
+        labelspacing=0.35,
+    )
+    legend_shamir.get_frame().set_alpha(0.95)
+    legend_shamir._legend_box.align = "left"
 
 
 def make_cost_scan_figure(outname: str):
     fig, axs = plt.subplots(
-        2, 2,
-        figsize=(7, 3.5),
-        sharex=True,
-        sharey=True,
+        3, 2,
+        figsize=(7, 5.45),
+        sharex="col",
+        sharey="row",
         layout="constrained"
     )
 
-    # ---- Set limits early so gradient connector uses final transform ----
-    # Your requested x-range:
-    for ax in axs.ravel():
-        ax.set_xlim(50.0, 5700.0)
-
-    ys_all = np.array([e["mres"] for e in entries], dtype=float)
-    ys_all = ys_all[np.isfinite(ys_all) & (ys_all > 0)]
-    if ys_all.size > 0:
-        ymin = max(ys_all.min() * 0.4, 1e-12)
-        ymax = ys_all.max() * 2.0
+    xs_all = np.array([e["mres"] for e in entries], dtype=float)
+    xs_all = xs_all[np.isfinite(xs_all) & (xs_all > 0)]
+    if xs_all.size > 0:
+        xmin = max(xs_all.min() * 0.6, 1e-12)
+        xmax = xs_all.max() * 1.8
         for ax in axs.ravel():
-            ax.set_ylim(ymin, ymax)
+            ax.set_xlim(xmin, xmax)
 
-    # ---- Plot panels ----
     for j, beta in enumerate(beta_vals):
         panel_entries = entries_by_beta[beta]
-        plot_cost_mobius(axs[0, j], panel_entries, beta)  # top row
-        plot_cost_shamir(axs[1, j], panel_entries, beta)  # bottom row
+        title = rf"$\beta={beta}\; am_0={_mass_str(panel_entries)}$"
+        plot_combined_metric_panel(
+            axs[0, j],
+            panel_entries,
+            beta,
+            y_key="bcs",
+            y_err_key="bcs_err",
+            ylabel=r"Full bcs" if j == 0 else None,
+            title=title,
+        )
+        add_panel_mobius_legend(axs[0, j], panel_entries)
+        plot_combined_metric_panel(
+            axs[1, j],
+            panel_entries,
+            beta,
+            y_key="t_traj",
+            y_err_key="t_traj_err",
+            ylabel=r"$t_{\mathrm{traj}}\;[\mathrm{s}]$" if j == 0 else None,
+        )
+        plot_combined_metric_panel(
+            axs[2, j],
+            panel_entries,
+            beta,
+            y_key="x_eff",
+            y_err_key="x_eff_err",
+            ylabel=r"$\tau_{\mathrm{int}}^{\mathrm{PS}} \times t_{\mathrm{traj}}\;[\mathrm{s}]$" if j == 0 else None,
+        )
 
-    # Labels
-    axs[1, 0].set_xlabel(r"$\tau_{\mathrm{int}}^{\mathrm{plaq}} \times t_{\mathrm{traj}}\;[\mathrm{s}]$")
-    axs[1, 1].set_xlabel(r"$\tau_{\mathrm{int}}^{\mathrm{plaq}} \times t_{\mathrm{traj}}\;[\mathrm{s}]$")
-    axs[0, 0].set_ylabel(r"$a m_{\rm res}$")
-    axs[1, 0].set_ylabel(r"$a m_{\rm res}$")
+    add_shared_shamir_legend(fig, axs[0, :])
+
+    ttraj_vals = np.array([e["t_traj"] for e in entries], dtype=float)
+    ttraj_errs = np.array([e["t_traj_err"] for e in entries], dtype=float)
+    ttraj_mask = np.isfinite(ttraj_vals) & np.isfinite(ttraj_errs)
+    if np.any(ttraj_mask):
+        ttraj_top = np.max(ttraj_vals[ttraj_mask] + ttraj_errs[ttraj_mask])
+        for ax in axs[1, :]:
+            ax.set_ylim(0.0, ttraj_top * 1.05)
+
+    axs[2, 0].set_xlabel(r"$a m_{\rm res}$")
+    axs[2, 1].set_xlabel(r"$a m_{\rm res}$")
 
     plt.savefig(outname, dpi=300)
     plt.close()
-    print(f"Saved cost scan plot → {outname}")
+    print(f"Saved combined trajectory/cost/bcs plot → {outname}")
 
 
 # ============================================================
