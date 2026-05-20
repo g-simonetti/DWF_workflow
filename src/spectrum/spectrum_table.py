@@ -1,312 +1,670 @@
 #!/usr/bin/env python3
+
 import argparse
 import json
 import os
-import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 
-# -----------------------------------------------------------
-# Format value ± error -> "1.234(56)"
-# -----------------------------------------------------------
-def fmt_err(val, err):
-    if pd.isna(val):
-        return "nan"
-    if err == 0 or pd.isna(err):
-        return f"{val:.4e}"
+# ---------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------
 
-    e = abs(err)
-    if e == 0:
-        return f"{val:.4e}"
-
-    digits = int(np.floor(np.log10(e)))
-    nd = max(0, -digits + 1)
-
-    fmt = f"{{:.{nd}f}}"
-    val_s = fmt.format(val)
-    err_s = fmt.format(e)
-
-    frac = err_s.split(".")[-1] if "." in err_s else ""
-    sig = frac.lstrip("0") or "0"
-    return f"{val_s}({sig})"
-
-
-# -----------------------------------------------------------
-# tau_Q formatter with fixed decimals -> "12.34(56)"
-# -----------------------------------------------------------
-def fmt_err_fixed2(val, err, n_decimals=2):
-    if pd.isna(val):
-        return "nan"
-    if err == 0 or pd.isna(err):
-        return f"{val:.{n_decimals}f}"
-
-    scale = 10 ** n_decimals
-    val_s = f"{val:.{n_decimals}f}"
-    err_scaled = int(round(abs(err) * scale))
-    err_digits = str(err_scaled).lstrip("0") or "0"
-    return f"{val_s}({err_digits})"
-
-
-# -----------------------------------------------------------
-# sqrt error propagation
-# -----------------------------------------------------------
-def sqrt_with_error(w0_sq, w0_sq_err):
-    if pd.isna(w0_sq) or w0_sq <= 0:
-        return np.nan, np.nan
-    w0 = np.sqrt(w0_sq)
-    if pd.isna(w0_sq_err):
-        return w0, np.nan
-    err = abs(w0_sq_err) / (2.0 * w0)
-    return w0, err
-
-
-# -----------------------------------------------------------
-# JSON helpers (IGNORE any "ok" fields)
-# -----------------------------------------------------------
-def _load_json(path: str) -> dict:
+def read_json(path):
     with open(path, "r") as f:
         return json.load(f)
 
-def _num(x, default=np.nan):
+
+def safe_get(dct, *keys, default=np.nan):
+    cur = dct
+    for key in keys:
+        if not isinstance(cur, dict) or key not in cur:
+            return default
+        cur = cur[key]
+    return cur
+
+
+def to_float(x, default=np.nan):
     try:
         if x is None:
             return default
         v = float(x)
         return v if np.isfinite(v) else default
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
-def _extract_value_err(obj, key: str):
+
+def normalize_flag_series(series):
+    s = series.astype("string")
+    return s.str.strip().str.lower().isin(["true", "1", "yes", "y"])
+
+
+def first_finite(*vals, default=np.nan):
+    for v in vals:
+        x = to_float(v, default=np.nan)
+        if np.isfinite(x):
+            return x
+    return default
+
+
+def extract_value_err(obj, key):
     """
     Supports:
-      - {"key": {"mean":..., "sdev":...}}
-      - {"key": {"value":..., "err":...}}
-      - {"key": ..., "key_err": ...}
+      - {key: {"mean": ..., "sdev": ...}}
+      - {key: {"value": ..., "err": ...}}
+      - {key: ..., f"{key}_err": ...}
     """
     if not isinstance(obj, dict):
-        return (np.nan, np.nan)
+        return np.nan, np.nan
 
     if key in obj and isinstance(obj[key], dict):
         d = obj[key]
-        if ("mean" in d) or ("sdev" in d):
-            return (_num(d.get("mean")), _num(d.get("sdev")))
-        if ("value" in d) or ("err" in d):
-            return (_num(d.get("value")), _num(d.get("err")))
+        if "mean" in d or "sdev" in d:
+            return to_float(d.get("mean")), to_float(d.get("sdev"))
+        if "value" in d or "err" in d:
+            return to_float(d.get("value")), to_float(d.get("err"))
 
     if key in obj:
-        return (_num(obj.get(key)), _num(obj.get(f"{key}_err")))
+        return to_float(obj.get(key)), to_float(obj.get(f"{key}_err"))
 
-    return (np.nan, np.nan)
-
-
-# -----------------------------------------------------------
-# Read spectrum.json (IGNORE "ok")
-# -----------------------------------------------------------
-def read_spectrum_json(filename: str) -> pd.Series:
-    j = _load_json(filename)
-    base = j.get("results", j)
-
-    am_ps, am_ps_err = _extract_value_err(base, "am_ps")
-    am_v, am_v_err   = _extract_value_err(base, "am_v")
-    af_ps, af_ps_err = _extract_value_err(base, "af_ps")
-    Z_A, Z_A_err     = _extract_value_err(base, "Z_A")
-
-    # support either explicit chi2_* keys or chi2_over_dof dict
-    chi2_map = base.get("chi2_over_dof", {}) if isinstance(base.get("chi2_over_dof", {}), dict) else {}
-    chi2_ps  = _num(base.get("chi2_ps",  chi2_map.get("ps")))
-    chi2_v   = _num(base.get("chi2_v",   chi2_map.get("v")))
-    chi2_fps = _num(base.get("chi2_fps", chi2_map.get("fps")))
-    chi2_Z   = _num(base.get("chi2_Z",   chi2_map.get("Z")))
-
-    return pd.Series(
-        {
-            "am_ps": am_ps,
-            "am_ps_err": am_ps_err,
-            "am_v": am_v,
-            "am_v_err": am_v_err,
-            "chi2_ps": chi2_ps,
-            "chi2_v": chi2_v,
-            "af_ps": af_ps,
-            "af_ps_err": af_ps_err,
-            "chi2_fps": chi2_fps,
-            "Z_A": Z_A,
-            "Z_A_err": Z_A_err,
-            "chi2_Z": chi2_Z,
-        }
-    )
+    return np.nan, np.nan
 
 
-# -----------------------------------------------------------
-# Read wflow_extract.json (IGNORE "ok")
-# -----------------------------------------------------------
-def read_wflow_json(filename: str) -> pd.Series:
-    j = _load_json(filename)
-    base = j.get("results", j)
+def format_phys_err(value, error, force_decimals=None):
+    value = to_float(value)
+    error = abs(to_float(error))
 
-    w0_sq, w0_sq_err = _extract_value_err(base, "w0_sq")
-    Q, Q_err         = _extract_value_err(base, "Q")
+    if not np.isfinite(value):
+        return "—"
+    if not np.isfinite(error) or error == 0:
+        if force_decimals is not None:
+            return f"{value:.{force_decimals}f}"
+        return f"{value:g}"
 
-    tau_q, tau_q_err = _extract_value_err(base, "tau_q")
-    if pd.isna(tau_q):
-        tau_q, tau_q_err = _extract_value_err(base, "tau_Q")
+    exp = int(np.floor(np.log10(error)))
+    norm = error / 10**exp
+    sig = 2 if norm < 3 else 1
+    decimals = max(0, -exp + sig - 1)
 
-    return pd.Series(
-        {
-            "w0_sq": w0_sq,
-            "w0_sq_err": w0_sq_err,
-            "Q": Q,
-            "Q_err": Q_err,
-            "tau_q": tau_q,
-            "tau_q_err": tau_q_err,
-        }
-    )
+    if force_decimals is not None:
+        decimals = force_decimals
+
+    value_r = round(value, decimals)
+    error_r = round(error, decimals)
+
+    value_str = f"{value_r:.{decimals}f}"
+
+    if error_r < 1:
+        err_digits = int(round(error_r * 10**decimals))
+        return f"{value_str}({err_digits})"
+    else:
+        err_str = f"{error_r:.{decimals}f}"
+        return f"{value_str}({err_str})"
 
 
-# -----------------------------------------------------------
-# Parse parameters from the path (matches Snakefile wildcards)
-# Example:
-# intermediary_data/NF2/Nt32/Ns16/Ls8/B7.4/M0.06/mpv1.0/alpha1.75/a51.0/M51.8/spectrum/spectrum.json
-# -----------------------------------------------------------
-def parse_params_from_path(path: str) -> dict:
-    p = path.replace("\\", "/")
+def format_floatish(x, fmt=".3f"):
+    x = to_float(x)
+    if np.isfinite(x):
+        return format(x, fmt)
+    return "—"
 
-    def grab(pattern, cast=str):
-        m = re.search(pattern, p)
-        return cast(m.group(1)) if m else None
 
-    return {
-        "NF":   grab(r"/NF(\d+)/", int),
-        "Nt":   grab(r"/Nt(\d+)/", int),
-        "Ns":   grab(r"/Ns(\d+)/", int),
-        "Ls":   grab(r"/Ls(\d+)/", int),
-        "beta": grab(r"/B([0-9.]+)/", float),
-        "mass": grab(r"/M([0-9.]+)/mpv", float),
-        "mpv":  grab(r"/mpv([0-9.]+)/", float),
-        "alpha":grab(r"/alpha([0-9.]+)/", float),
-        "a5":   grab(r"/a5([0-9.]+)/", float),
-        "M5":   grab(r"/M5([0-9.]+)/", float),
+def format_intish(x):
+    x = to_float(x)
+    if np.isfinite(x):
+        return str(int(round(x)))
+    return "—"
+
+
+def sqrt_with_error(x, x_err):
+    x = to_float(x)
+    x_err = to_float(x_err)
+
+    if not np.isfinite(x) or x <= 0:
+        return np.nan, np.nan
+
+    y = np.sqrt(x)
+    if not np.isfinite(x_err):
+        return y, np.nan
+
+    y_err = abs(x_err) / (2.0 * y)
+    return y, y_err
+
+
+# ---------------------------------------------------------------------
+# Path / parameter helpers
+# ---------------------------------------------------------------------
+
+def extract_from_path(path):
+    vals = {
+        "NF": np.nan,
+        "beta": np.nan,
+        "mass": np.nan,
+        "Nt": np.nan,
+        "Ns": np.nan,
+        "Ls": np.nan,
+        "alpha": np.nan,
+        "a5": np.nan,
+        "m5": np.nan,
+        "mpv": np.nan,
     }
 
+    parts = Path(path).parts
 
-def lookup_metadata_row(meta: pd.DataFrame, pars: dict):
-    df = meta.copy()
+    for p in parts:
+        if p.startswith("NF"):
+            vals["NF"] = to_float(p[2:], vals["NF"])
+        elif p.startswith("B"):
+            vals["beta"] = to_float(p[1:], vals["beta"])
+        elif p.startswith("Nt"):
+            vals["Nt"] = to_float(p[2:], vals["Nt"])
+        elif p.startswith("Ns"):
+            vals["Ns"] = to_float(p[2:], vals["Ns"])
+        elif p.startswith("Ls"):
+            vals["Ls"] = to_float(p[2:], vals["Ls"])
+        elif p.startswith("alpha"):
+            vals["alpha"] = to_float(p[5:], vals["alpha"])
+        elif p.startswith("a5"):
+            vals["a5"] = to_float(p[2:], vals["a5"])
+        elif p.startswith("mpv"):
+            vals["mpv"] = to_float(p[3:], vals["mpv"])
+        elif p.startswith("M5"):
+            vals["m5"] = to_float(p[2:], vals["m5"])
+        elif p.startswith("M") and not p.startswith("M5") and not np.isfinite(vals["mass"]):
+            vals["mass"] = to_float(p[1:], vals["mass"])
 
-    # int columns
-    for c in ["NF", "Nt", "Ns", "Ls"]:
-        if c in df.columns and pars.get(c) is not None:
-            df = df[df[c].astype(int) == int(pars[c])]
+    return vals
 
-    # float-ish columns (tolerant matching)
-    for c, tol in [
-        ("beta", 1e-6),
-        ("mass", 1e-12),
-        ("mpv", 1e-6),
-        ("alpha", 1e-6),
-        ("a5", 1e-6),
-        ("M5", 1e-6),
-    ]:
-        if c in df.columns and pars.get(c) is not None:
-            df = df[np.isclose(df[c].astype(float), float(pars[c]), rtol=0, atol=tol)]
 
-    if len(df) == 0:
+def merge_prefer_finite(primary, fallback):
+    out = dict(primary)
+    for k, v in fallback.items():
+        if not np.isfinite(to_float(out.get(k, np.nan))):
+            out[k] = v
+    return out
+
+
+def read_common_parameters(data, path):
+    params = safe_get(data, "parameters", default={})
+
+    from_json = {
+        "NF": to_float(safe_get(params, "NF", default=np.nan)),
+        "beta": to_float(safe_get(params, "beta", default=np.nan)),
+        "mass": to_float(safe_get(params, "mass", default=np.nan)),
+        "Nt": to_float(safe_get(params, "Nt", default=np.nan)),
+        "Ns": to_float(safe_get(params, "Ns", default=np.nan)),
+        "Ls": to_float(safe_get(params, "Ls", default=np.nan)),
+        "alpha": to_float(safe_get(params, "alpha", default=np.nan)),
+        "a5": to_float(safe_get(params, "a5", default=np.nan)),
+        "m5": to_float(
+            safe_get(params, "m5", default=safe_get(params, "M5", default=np.nan))
+        ),
+        "mpv": to_float(safe_get(params, "mpv", default=np.nan)),
+    }
+
+    from_path = extract_from_path(path)
+    return merge_prefer_finite(from_json, from_path)
+
+
+# ---------------------------------------------------------------------
+# Readers
+# ---------------------------------------------------------------------
+
+def read_spectrum_json(path):
+    data = read_json(path)
+    base = safe_get(data, "results", default=data)
+
+    rec = read_common_parameters(data, path)
+
+    rec["n_cfg"] = to_float(
+        safe_get(data, "data_shape", "Ncfg", default=np.nan)
+    )
+
+    am_ps, am_ps_err = extract_value_err(base, "am_ps")
+    am_v, am_v_err = extract_value_err(base, "am_v")
+
+    if not np.isfinite(am_ps):
+        am_ps = first_finite(
+            safe_get(data, "results", "standard_fit", "PP", "am_ps", "mean"),
+            safe_get(data, "results", "bootstrap_fit", "PP", "am_ps", "mean"),
+        )
+    if not np.isfinite(am_ps_err):
+        am_ps_err = first_finite(
+            safe_get(data, "results", "bootstrap_fit", "PP", "am_ps", "sdev"),
+            safe_get(data, "results", "standard_fit", "PP", "am_ps", "sdev"),
+        )
+
+    if not np.isfinite(am_v):
+        am_v = first_finite(
+            safe_get(data, "results", "standard_fit", "V", "am_v", "mean"),
+            safe_get(data, "results", "bootstrap_fit", "V", "am_v", "mean"),
+            safe_get(data, "results", "standard_fit", "VV", "am_v", "mean"),
+            safe_get(data, "results", "bootstrap_fit", "VV", "am_v", "mean"),
+        )
+    if not np.isfinite(am_v_err):
+        am_v_err = first_finite(
+            safe_get(data, "results", "bootstrap_fit", "V", "am_v", "sdev"),
+            safe_get(data, "results", "standard_fit", "V", "am_v", "sdev"),
+            safe_get(data, "results", "bootstrap_fit", "VV", "am_v", "sdev"),
+            safe_get(data, "results", "standard_fit", "VV", "am_v", "sdev"),
+        )
+
+    chi2_map = safe_get(base, "chi2_over_dof", default={})
+    chi2_ps = first_finite(
+        safe_get(data, "results", "standard_fit", "PP", "fit_stats", "chi2_over_dof"),
+        safe_get(data, "results", "bootstrap_fit", "PP", "fit_stats", "chi2_over_dof"),
+        safe_get(base, "chi2_ps"),
+        chi2_map.get("ps") if isinstance(chi2_map, dict) else np.nan,
+    )
+    chi2_v = first_finite(
+        safe_get(data, "results", "standard_fit", "V", "fit_stats", "chi2_over_dof"),
+        safe_get(data, "results", "bootstrap_fit", "V", "fit_stats", "chi2_over_dof"),
+        safe_get(data, "results", "standard_fit", "VV", "fit_stats", "chi2_over_dof"),
+        safe_get(data, "results", "bootstrap_fit", "VV", "fit_stats", "chi2_over_dof"),
+        safe_get(base, "chi2_v"),
+        chi2_map.get("v") if isinstance(chi2_map, dict) else np.nan,
+    )
+
+    rec["mps"] = am_ps
+    rec["mps_err"] = am_ps_err
+    rec["chi2_ps"] = chi2_ps
+
+    rec["mv"] = am_v
+    rec["mv_err"] = am_v_err
+    rec["chi2_v"] = chi2_v
+
+    rec["_source_file_spectrum"] = str(path)
+    return rec
+
+
+def read_mres_json(path):
+    data = read_json(path)
+
+    rec = read_common_parameters(data, path)
+
+    rec["tau_ps"] = to_float(
+        safe_get(data, "mres_extract", "ptll_tau_int", "tau_int", default=np.nan)
+    )
+    rec["tau_ps_err"] = to_float(
+        safe_get(data, "mres_extract", "ptll_tau_int", "tau_int_err", default=np.nan)
+    )
+
+    rec["_source_file_mres"] = str(path)
+    return rec
+
+
+def read_wflow_json(path):
+    data = read_json(path)
+    base = safe_get(data, "summary", default=data)
+
+    rec = read_common_parameters(data, path)
+
+    # Prefer the directly stored w0/a summary from modern wflow_extract.json.
+    # Fall back to reconstructing it from w0_sq for older files.
+    w0, w0_err = extract_value_err(base, "w0")
+    if not np.isfinite(w0):
+        w0 = first_finite(
+            safe_get(base, "w0", default=np.nan),
+            safe_get(data, "summary", "w0", default=np.nan),
+        )
+    if not np.isfinite(w0_err):
+        w0_err = first_finite(
+            safe_get(base, "w0_err", default=np.nan),
+            safe_get(data, "summary", "w0_err", default=np.nan),
+        )
+
+    if not np.isfinite(w0):
+        w0_sq, w0_sq_err = extract_value_err(base, "w0_sq")
+        w0, w0_err = sqrt_with_error(w0_sq, w0_sq_err)
+
+    rec["w0"] = w0
+    rec["w0_err"] = w0_err
+
+    rec["tau_w0"] = to_float(
+        safe_get(data, "tau_int", "w0", "tau_int", default=np.nan)
+    )
+    rec["tau_w0_err"] = to_float(
+        safe_get(data, "tau_int", "w0", "tau_int_err", default=np.nan)
+    )
+
+    rec["_source_file_wflow"] = str(path)
+    return rec
+
+
+# ---------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------
+
+def read_metadata(metadata_csv, use_name):
+    meta = pd.read_csv(metadata_csv, sep=r"\t|,", engine="python")
+
+    flagcol = f"use_in_{use_name}"
+    if flagcol not in meta.columns:
+        raise ValueError(f"Column '{flagcol}' not found in {metadata_csv}")
+
+    meta = meta[normalize_flag_series(meta[flagcol])].copy()
+    if meta.empty:
+        raise ValueError(f"No rows selected by column '{flagcol}'")
+
+    if "name" not in meta.columns:
+        raise ValueError(f"Column 'name' not found in {metadata_csv}")
+
+    meta["name"] = meta["name"].astype(str).str.strip()
+
+    numeric_cols = [
+        "NF", "beta", "mass", "Nt", "Ns", "Ls", "alpha", "a5", "mpv",
+        "delta_traj_w0",
+    ]
+    for c in numeric_cols:
+        if c in meta.columns:
+            meta[c] = pd.to_numeric(meta[c], errors="coerce")
+
+    if "M5" in meta.columns:
+        meta["m5"] = pd.to_numeric(meta["M5"], errors="coerce")
+    elif "m5" in meta.columns:
+        meta["m5"] = pd.to_numeric(meta["m5"], errors="coerce")
+    else:
+        meta["m5"] = np.nan
+
+    meta["_meta_order"] = np.arange(len(meta))
+    return meta
+
+
+# ---------------------------------------------------------------------
+# Matching
+# ---------------------------------------------------------------------
+
+MATCH_COLS = ["NF", "beta", "mass", "Nt", "Ns", "Ls", "alpha", "a5", "m5", "mpv"]
+
+
+def match_record(meta, rec):
+    missing = [c for c in MATCH_COLS if c not in meta.columns]
+    if missing:
+        missing = [c for c in missing if c != "NF"]
+        if missing:
+            raise ValueError(f"Metadata is missing required matching columns: {missing}")
+
+    mask = np.ones(len(meta), dtype=bool)
+
+    for c in MATCH_COLS:
+        if c not in meta.columns:
+            continue
+
+        rv = to_float(rec.get(c, np.nan))
+        if not np.isfinite(rv):
+            return None
+
+        mask &= np.isclose(meta[c], rv, equal_nan=False)
+
+    matches = meta[mask]
+
+    if len(matches) == 0:
         return None
 
-    # prefer use_in_spectrum True if present
-    if "use_in_spectrum" in df.columns:
-        df2 = df[df["use_in_spectrum"] == True]
-        if len(df2) > 0:
-            df = df2
+    if len(matches) > 1:
+        src = rec.get(
+            "_source_file_spectrum",
+            rec.get("_source_file_mres", rec.get("_source_file_wflow", "<unknown>"))
+        )
+        raise ValueError(f"Ambiguous metadata match for {src}: matched {len(matches)} rows")
 
-    return df.iloc[0]
+    return matches.iloc[0]
 
 
-# -----------------------------------------------------------
-# Main
-# -----------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--spectrum", nargs="+", required=True)
-    parser.add_argument("--wflow", nargs="+", required=True)
-    parser.add_argument("--metadata_csv", required=True)
-    parser.add_argument("--output_file", required=True)
-    args = parser.parse_args()
+def record_key(rec):
+    vals = []
+    for c in MATCH_COLS:
+        x = to_float(rec.get(c, np.nan))
+        if np.isfinite(x):
+            vals.append(round(x, 12))
+        else:
+            vals.append(np.nan)
+    return tuple(vals)
 
-    if len(args.spectrum) != len(args.wflow):
-        raise ValueError("Number of --spectrum and --wflow files must match.")
 
-    meta = pd.read_csv(args.metadata_csv)
+# ---------------------------------------------------------------------
+# Build dataframe
+# ---------------------------------------------------------------------
+
+def build_dataframe(spectrum_files, mres_files, wflow_files, metadata_csv, use_name):
+    meta = read_metadata(metadata_csv, use_name)
+
+    spec_map = {}
+    for path in spectrum_files:
+        try:
+            rec = read_spectrum_json(path)
+        except Exception as e:
+            print(f"Warning: could not read spectrum JSON {path}: {e}")
+            continue
+        spec_map[record_key(rec)] = rec
+
+    mres_map = {}
+    for path in mres_files:
+        try:
+            rec = read_mres_json(path)
+        except Exception as e:
+            print(f"Warning: could not read m_res JSON {path}: {e}")
+            continue
+        mres_map[record_key(rec)] = rec
+
+    wflow_map = {}
+    for path in wflow_files:
+        try:
+            rec = read_wflow_json(path)
+        except Exception as e:
+            print(f"Warning: could not read wflow JSON {path}: {e}")
+            continue
+        wflow_map[record_key(rec)] = rec
+
+    all_keys = list(
+        dict.fromkeys(
+            list(spec_map.keys()) + list(mres_map.keys()) + list(wflow_map.keys())
+        )
+    )
 
     rows = []
-    for spec_path, wf_path in zip(args.spectrum, args.wflow):
-        spec = read_spectrum_json(spec_path)
-        wf   = read_wflow_json(wf_path)
+    for key in all_keys:
+        rec = {}
 
-        pars = parse_params_from_path(spec_path)
-        meta_row = lookup_metadata_row(meta, pars)
+        if key in spec_map:
+            rec.update(spec_map[key])
+        if key in mres_map:
+            rec.update(mres_map[key])
+        if key in wflow_map:
+            rec.update(wflow_map[key])
 
-        if meta_row is not None and "name" in meta_row.index:
-            name = str(meta_row["name"])
+        match = match_record(meta, rec)
+
+        if match is None:
+            fallback = rec.get(
+                "_source_file_spectrum",
+                rec.get("_source_file_mres", rec.get("_source_file_wflow", "unknown"))
+            )
+            rec["name"] = Path(fallback).parent.parent.name
+            rec["_meta_order"] = 10**9
         else:
-            # fallback if not found
-            name = os.path.basename(os.path.dirname(os.path.dirname(spec_path)))
+            rec["name"] = match["name"]
+            rec["_meta_order"] = match["_meta_order"]
 
-        tau_q_str = fmt_err_fixed2(wf["tau_q"], wf["tau_q_err"], n_decimals=2)
+            if "delta_traj_w0" in match.index:
+                rec["delta_traj_w0"] = to_float(match["delta_traj_w0"])
 
-        w0, w0_err = sqrt_with_error(wf["w0_sq"], wf["w0_sq_err"])
-        w0_str = fmt_err(w0, w0_err)
+        rows.append(rec)
 
-        f_ps_str = fmt_err(spec["af_ps"], spec["af_ps_err"])
-        Z_A_str  = fmt_err(spec["Z_A"],  spec["Z_A_err"])
+    if not rows:
+        raise RuntimeError("No records were loaded.")
 
-        chi2_Z_str  = "nan" if pd.isna(spec["chi2_Z"])  else f"{spec['chi2_Z']:.2f}"
-        chi2_ps_str = "nan" if pd.isna(spec["chi2_ps"]) else f"{spec['chi2_ps']:.2f}"
-        chi2_v_str  = "nan" if pd.isna(spec["chi2_v"])  else f"{spec['chi2_v']:.2f}"
+    df = pd.DataFrame(rows)
 
-        rows.append([
-            name,
-            fmt_err(spec["am_ps"], spec["am_ps_err"]),
-            chi2_ps_str,
-            fmt_err(spec["am_v"], spec["am_v_err"]),
-            chi2_v_str,
-            f_ps_str,
-            Z_A_str,
-            chi2_Z_str,
-            w0_str,
-            fmt_err(wf["Q"], wf["Q_err"]),
-            tau_q_str,
-        ])
-
-    headers = [
-        "name",
-        "$am_\\pi$", "$\\chi^2_\\pi$",
-        "$am_{\\mathrm{V}}$", "$\\chi^2_{\\mathrm{V}}$",
-        "$af_{\\pi}$",
-        "$Z_A$",
-        "$\\chi^2_{Z_A}$",
-        "$w_0/a$",
-        "$Q$", "$\\tau_Q$",
+    needed_cols = [
+        "name", "_meta_order",
+        "n_cfg",
+        "delta_traj_w0",
+        "tau_ps", "tau_ps_err",
+        "mps", "mps_err", "chi2_ps",
+        "mv", "mv_err", "chi2_v",
+        "w0", "w0_err", "tau_w0", "tau_w0_err",
     ]
+    for c in needed_cols:
+        if c not in df.columns:
+            df[c] = np.nan
 
-    tex = []
-    tex.append("\\begin{tabular}{c c c c c c c c c c c}")
-    tex.append("\\hline")
-    tex.append(" & ".join(headers) + " \\\\")
-    tex.append("\\hline")
-    for r in rows:
-        tex.append(" & ".join(map(str, r)) + " \\\\")
-    tex.append("\\hline")
-    tex.append("\\end{tabular}")
+    df["tau_ps_fmt"] = df.apply(
+        lambda r: format_phys_err(r["tau_ps"], r["tau_ps_err"], force_decimals=2),
+        axis=1
+    )
+    df["mps_fmt"] = df.apply(
+        lambda r: format_phys_err(r["mps"], r["mps_err"]),
+        axis=1
+    )
+    df["mv_fmt"] = df.apply(
+        lambda r: format_phys_err(r["mv"], r["mv_err"]),
+        axis=1
+    )
+    df["w0_fmt"] = df.apply(
+        lambda r: format_phys_err(r["w0"], r["w0_err"]),
+        axis=1
+    )
+    df["tau_w0_fmt"] = df.apply(
+        lambda r: format_phys_err(r["tau_w0"], r["tau_w0_err"], force_decimals=2),
+        axis=1
+    )
 
-    out_dir = os.path.dirname(args.output_file)
+    df = (
+        df.sort_values(["_meta_order", "name"])
+          .drop_duplicates(subset=["name"], keep="first")
+          .reset_index(drop=True)
+    )
+
+    return df
+
+
+# ---------------------------------------------------------------------
+# LaTeX writer
+# ---------------------------------------------------------------------
+
+def build_table(df, output_file):
+    header_line = (
+        "Ensemble & $n_{\\rm cfg}$ & $\\Delta_{\\rm traj}^{w_0}$ & "
+        "$\\tau_{\\rm int}^{\\rm PS}$ & $am_{\\rm PS}$ & "
+        "$\\chi^2_{\\rm PS}$ & $am_{\\rm V}$ & $\\chi^2_{\\rm V}$ & "
+        "$w_0/a$ & $\\tau_{\\rm int}^{w_0}$ \\\\\n"
+    )
+    longtable_spec = "|c|c|c|c|c|c|c|c|c|c|"
+
+    out_dir = os.path.dirname(output_file)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    with open(args.output_file, "w") as f:
-        f.write("\n".join(tex))
+    with open(output_file, "w") as f:
+        f.write("%%%\\color{red}\n")
+        f.write(f"%%%\\begin{{longtable}}{{{longtable_spec}}}\n")
 
-    print(f"✓ Wrote LaTeX table → {args.output_file}")
+        f.write("%%%\\caption\n")
+        f.write("%%%\\label \\\\\n\n")
+
+        f.write("% ================= FIRST PAGE HEADER =================\n")
+        f.write(header_line)
+        f.write("\\hline\n")
+        f.write("\\endfirsthead\n\n")
+
+        f.write("% ================ HEADER FOR PAGE 2+ =================\n")
+        f.write("\\hline\n")
+        f.write(header_line)
+        f.write("\\hline\n")
+        f.write("\\endhead\n\n")
+
+        f.write("% ================= FOOTER FOR INTERMEDIATE PAGES =================\n")
+        f.write("\\hline\n")
+        f.write("\\endfoot\n\n")
+
+        f.write("% ================= FINAL FOOTER =================\n")
+        f.write("\\hline\\hline\n")
+        f.write("\\endlastfoot\n\n")
+
+        f.write("% ===================== TABLE BODY =====================\n")
+
+        nrows = len(df)
+        for i, (_, r) in enumerate(df.iterrows()):
+            line = (
+                f"{r['name']} & "
+                f"{format_intish(r['n_cfg'])} & "
+                f"{format_intish(r['delta_traj_w0'])} & "
+                f"{r['tau_ps_fmt']} & "
+                f"{r['mps_fmt']} & "
+                f"{format_floatish(r['chi2_ps'], '.2f')} & "
+                f"{r['mv_fmt']} & "
+                f"{format_floatish(r['chi2_v'], '.2f')} & "
+                f"{r['w0_fmt']} & "
+                f"{r['tau_w0_fmt']}"
+            )
+
+            if i < nrows - 1:
+                line += r" \\"
+
+            f.write(line + "\n")
+
+    print(f"[table_spectrum] wrote {output_file} with {len(df)} ensembles")
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate a LaTeX table from spectrum.json, m_res.json, and "
+            "wflow_extract.json files, using metadata for ensemble selection and ordering."
+        )
+    )
+    parser.add_argument(
+        "--spectrum",
+        nargs="+",
+        required=True,
+        help="List of spectrum.json files",
+    )
+    parser.add_argument(
+        "--mres",
+        nargs="+",
+        required=True,
+        help="List of m_res.json files",
+    )
+    parser.add_argument(
+        "--wflow",
+        nargs="+",
+        required=True,
+        help="List of wflow_extract.json files",
+    )
+    parser.add_argument(
+        "--metadata_csv",
+        required=True,
+        help="Path to ensembles.csv",
+    )
+    parser.add_argument(
+        "--output_file",
+        required=True,
+        help="Output LaTeX file",
+    )
+    parser.add_argument(
+        "--use",
+        default="spectrum",
+        help="Selection name; metadata rows are filtered using column use_in_<use>.",
+    )
+
+    args = parser.parse_args()
+
+    df = build_dataframe(
+        args.spectrum,
+        args.mres,
+        args.wflow,
+        args.metadata_csv,
+        args.use,
+    )
+    build_table(df, args.output_file)
 
 
 if __name__ == "__main__":
