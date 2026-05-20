@@ -15,9 +15,10 @@ I/O behavior (UPDATED):
     plus the final estimate and scan data:
         {out_dir}/{base_name}_results.json
 
-  - Still produces plots:
+  - Produces plots:
         {out_dir}/{base_name}_vs_Nb.pdf
         {out_dir}/{base_name}_vs_n_therm.pdf
+        {out_dir}/{base_name}_observable.pdf
 
 No .txt output files are produced.
 
@@ -223,6 +224,34 @@ def plot_tau_vs_nb(
     plt.close(fig)
 
 
+def plot_observable_series(
+    y_full: np.ndarray,
+    therm: int,
+    plot_path: str,
+):
+    """
+    Plot the observable in its natural measurement order.
+    The x-axis is the sample index, i.e. the Monte Carlo time ordering.
+    A vertical dashed line marks the thermalization cut.
+    """
+    fig, ax = plt.subplots(figsize=(3.7, 2.6), layout="constrained")
+
+    ax.plot(y_full, linewidth=0.8)
+
+    if 0 <= therm < len(y_full):
+        ax.axvline(therm, linewidth=1.0, linestyle="--")
+
+    ax.set_xlabel("Monte Carlo time (index)")
+    ax.set_ylabel("Observable")
+
+    fmt = ScalarFormatter(useMathText=True)
+    ax.xaxis.set_major_formatter(fmt)
+    ax.yaxis.set_major_formatter(fmt)
+
+    fig.savefig(plot_path)
+    plt.close(fig)
+
+
 def scan_tau_vs_n_therm(
     y_full: np.ndarray,
     min_nbs: int = 4,
@@ -326,6 +355,7 @@ def compute_tau_from_file(
       - {base_name}_results.json          (contains binning table, estimate, scan)
       - {base_name}_vs_Nb.pdf
       - {base_name}_vs_n_therm.pdf
+      - {base_name}_observable.pdf
 
     Returns:
       tau_est, tau_err, Nb_est, Nbs_est, found
@@ -348,7 +378,11 @@ def compute_tau_from_file(
     # Paths
     plot_nb_path = os.path.join(out_dir, f"{base_name}_vs_Nb.pdf")
     plot_scan_path = os.path.join(out_dir, f"{base_name}_vs_n_therm.pdf")
+    plot_obs_path = os.path.join(out_dir, f"{base_name}_observable.pdf")
     json_path = os.path.join(out_dir, f"{base_name}_results.json")
+
+    # Observable plot
+    plot_observable_series(y_full, therm, plot_obs_path)
 
     # Build binning "table" as JSON array (this replaces the old TXT file)
     binning_table: list[dict[str, Any]] = []
@@ -412,6 +446,7 @@ def compute_tau_from_file(
         "plots": {
             "tau_vs_nb_pdf": plot_nb_path,
             "tau_vs_n_therm_pdf": (None if scan_payload.get("skipped", True) else plot_scan_path),
+            "observable_pdf": plot_obs_path,
         },
         "outputs": {
             "results_json": json_path,
