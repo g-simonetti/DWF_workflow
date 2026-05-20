@@ -237,6 +237,45 @@ def select_numbers_by_delta(numbers_sorted: list[int], delta_traj_ps: int) -> li
     return sorted(set(keep))
 
 
+def compute_tau_int_for_correlator(
+    series: np.ndarray,
+    traj_numbers: list[int],
+    tau_t: int,
+    out_json_dir: str,
+    subdir_name: str,
+    observable_label: str,
+    plot_styles: str | None,
+):
+    """Compute tau_int for a single correlator time slice using the shared backend."""
+    tau_out_dir = os.path.join(out_json_dir, subdir_name)
+    os.makedirs(tau_out_dir, exist_ok=True)
+
+    tau_series_path = os.path.join(tau_out_dir, f"{observable_label}_series.txt")
+    with open(tau_series_path, "w") as f:
+        f.write(f"# traj_number\t{observable_label}_re(t={tau_t})\n")
+        for n, y in zip(traj_numbers, series[:, tau_t]):
+            f.write(f"{n}\t{float(y):.16e}\n")
+
+    tau, tau_err, Nb_est, Nbs_est, found = compute_tau_from_file(
+        input_file=tau_series_path,
+        out_dir=tau_out_dir,
+        therm=0,
+        plot_styles=plot_styles if plot_styles else None,
+        base_name="tau_int",
+    )
+
+    return {
+        "t": int(tau_t),
+        "tau_int": float(tau),
+        "tau_int_err": float(tau_err),
+        "Nb_est": int(Nb_est),
+        "Nbs_est": int(Nbs_est),
+        "found": bool(found),
+        "tau_int_dir": str(tau_out_dir),
+        "series_file": str(tau_series_path),
+    }
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -349,8 +388,14 @@ def main():
         raise ValueError(f"Need at least 2 MEAS configurations after reading, got {min_len_meas}")
 
     # ----------------------------------------------------------
-    # Read FULL pt_ll series (for tau_int), NO delta thinning, in NUMBER order
+    # Read FULL correlator series (for tau_int), NO delta thinning, in NUMBER order
     # ----------------------------------------------------------
+    mres_full = np.array([read_mres_file(f) for f in mres_full_files])
+    if mres_full.shape[1] != n_times:
+        raise ValueError(
+            f"mres full-series time extent {mres_full.shape[1]} does not match MEAS extent {n_times}"
+        )
+
     ptll_full = np.array([read_ptll_file(f, n_elems=n_times) for f in ptll_full_files])
     used_numbers_full = full_numbers[: len(ptll_full)]
 
@@ -403,22 +448,27 @@ def main():
         raise ValueError(f"tau_int time slice t={tau_t} out of range [0, {n_times - 1}]")
 
     out_json_dir = os.path.dirname(os.path.abspath(args.mres_out)) or "."
-    tau_out_dir = os.path.join(out_json_dir, "tau_int_ptll")
-    os.makedirs(tau_out_dir, exist_ok=True)
-
-    tau_series_path = os.path.join(tau_out_dir, "ptll_series.txt")
-    with open(tau_series_path, "w") as f:
-        f.write(f"# traj_number\tpt_ll_re(t={tau_t})\n")
-        for n, y in zip(used_numbers_full, ptll_full[:, tau_t]):
-            f.write(f"{n}\t{float(y):.16e}\n")
-
-    ptll_tau, ptll_tau_err, Nb_est, Nbs_est, found = compute_tau_from_file(
-        input_file=tau_series_path,
-        out_dir=tau_out_dir,
-        therm=0,
-        plot_styles=args.plot_styles if args.plot_styles else None,
-        base_name="tau_int",
+    ptll_tau_info = compute_tau_int_for_correlator(
+        series=ptll_full,
+        traj_numbers=used_numbers_full,
+        tau_t=tau_t,
+        out_json_dir=out_json_dir,
+        subdir_name="tau_int_ptll",
+        observable_label="ptll",
+        plot_styles=args.plot_styles,
     )
+    ptll_tau_info["folded"] = False
+
+    pj5q_tau_info = compute_tau_int_for_correlator(
+        series=mres_full,
+        traj_numbers=used_numbers_full,
+        tau_t=tau_t,
+        out_json_dir=out_json_dir,
+        subdir_name="tau_int_pj5q",
+        observable_label="pj5q",
+        plot_styles=args.plot_styles,
+    )
+    pj5q_tau_info["folded"] = False
 
     # ----------------------------------------------------------
     # Write JSON output
@@ -449,6 +499,7 @@ def main():
             "fit_method": "correlated_constant_fit" if have_plateau else None,
             "fit_error_estimator": "GLS_analytic" if have_plateau else None,
             "tau_int_series": "unfolded_ptll",
+            "tau_int_series_additional": ["unfolded_pj5q"],
             "fit_performed": bool(have_plateau),
         },
         "ensembles": {
@@ -472,17 +523,8 @@ def main():
             "folded": True,
         },
         "mres_extract": {
-            "ptll_tau_int": {
-                "t": int(tau_t),
-                "tau_int": float(ptll_tau),
-                "tau_int_err": float(ptll_tau_err),
-                "Nb_est": int(Nb_est),
-                "Nbs_est": int(Nbs_est),
-                "found": bool(found),
-                "tau_int_dir": str(tau_out_dir),
-                "series_file": str(tau_series_path),
-                "folded": False,
-            },
+            "ptll_tau_int": ptll_tau_info,
+            "pj5q_tau_int": pj5q_tau_info,
         },
     }
 
@@ -539,7 +581,7 @@ def main():
     )
 
     if have_plateau:
-        fit_label = rf"$am_{{\rm res}}^{{\rm extract}} = {avg:.5f}\,\pm\,{err:.5f}$"
+        fit_label = rf"$am_{{\rm res}}^{{\rm fit}} = {avg:.5f}\,\pm\,{err:.5f}$"
         ax.axvspan(plateau_start, plateau_end, color="C2", alpha=0.2, label="Plateau range")
         ax.fill_between(
             [plateau_start, plateau_end],
@@ -580,7 +622,7 @@ def main():
 
     if have_plateau:
         print(
-            f"✓ Correlated plateau fit: am_res^extract = {avg:.6g} ± {err:.3g}"
+            f"✓ Correlated plateau fit: am_res^fit = {avg:.6g} ± {err:.3g}"
             + (f", chi2/dof = {red_chi2:.3g}" if red_chi2 is not None else "")
         )
     else:
@@ -588,11 +630,19 @@ def main():
 
     print(f"✓ Saved plot → {args.plot_file}")
     print(f"✓ Saved JSON → {args.mres_out}")
-    print(f"✓ tau_int outputs written in → {tau_out_dir}")
+    print(f"✓ pt_ll tau_int outputs written in → {ptll_tau_info['tau_int_dir']}")
     print(
         f"✓ pt_ll tau_int at t={tau_t} (FULL unfolded series; Berg/2): "
-        f"{ptll_tau:.6g} ± {ptll_tau_err:.3g}  "
-        f"(Nb={Nb_est}, Nbs={Nbs_est}, found={bool(found)})"
+        f"{ptll_tau_info['tau_int']:.6g} ± {ptll_tau_info['tau_int_err']:.3g}  "
+        f"(Nb={ptll_tau_info['Nb_est']}, Nbs={ptll_tau_info['Nbs_est']}, "
+        f"found={ptll_tau_info['found']})"
+    )
+    print(f"✓ PJ5q tau_int outputs written in → {pj5q_tau_info['tau_int_dir']}")
+    print(
+        f"✓ PJ5q tau_int at t={tau_t} (FULL unfolded series; Berg/2): "
+        f"{pj5q_tau_info['tau_int']:.6g} ± {pj5q_tau_info['tau_int_err']:.3g}  "
+        f"(Nb={pj5q_tau_info['Nb_est']}, Nbs={pj5q_tau_info['Nbs_est']}, "
+        f"found={pj5q_tau_info['found']})"
     )
 
 
